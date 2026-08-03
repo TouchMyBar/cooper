@@ -1,0 +1,29 @@
+[package]
+name = "cooper"
+version = "0.1.0"
+description = "Cooper — a FOSS capture panel for AI-assisted work"
+authors = ["Cooper contributors"]
+license = "Apache-2.0"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+arboard = "3"
+window-vibrancy = "0.6"
+enigo = "0.2"
+rdev = "0.5"
+
+[profile.release]
+panic = "abort"
+lto = "thin"
+opt-level = "s"
+strip = true
