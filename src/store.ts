@@ -11,6 +11,9 @@ export const api = {
   deleteItem: (id: number) => invoke("delete_item", { id }),
   clearCompleted: () => invoke("clear_completed"),
   setActiveSection: (id: number | null) => invoke("set_active_section", { id }),
+  setSectionCollapsed: (id: number, collapsed: boolean) =>
+    invoke("set_section_collapsed", { id, collapsed }),
+  addFiles: (paths: string[]) => invoke<number>("add_files", { paths }),
   createSection: (name: string) => invoke<number>("create_section", { name }),
   renameSection: (id: number, name: string) => invoke("rename_section", { id, name }),
   deleteSection: (id: number) => invoke("delete_section", { id }),

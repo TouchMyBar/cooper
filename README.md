@@ -76,7 +76,15 @@ First-run notes:
   screen, summoned and dismissed entirely from the keyboard.
 - **Sections** — type `# Name` to create one; everything you capture lands in
   the active section until you switch (`Ctrl/Cmd+K`). Right-click a header to
-  rename, delete, or retarget captures.
+  rename, delete, or retarget captures. Type `## Name` to start **fresh**: the
+  new section becomes the active area and everything else collapses upward
+  into compressed one-line dropdowns (click the `▸` to expand, or just search).
+- **Drag & drop files** — drop files or screenshots from your file manager
+  onto the panel; each becomes an item holding its path, ready to paste into a
+  prompt. While hovering you get a Finder-style `+` badge with how many you're
+  adding and how many are already in the active section.
+- **Focus hand-back** — hiding Cooper with `Esc` returns focus to the app you
+  were working in.
 - **Inline formatting** — cards render `**bold**`, `*italic*`,
   `~~strikethrough~~`, and `` `code` ``. (Underscore emphasis is intentionally
   unsupported so captured snake_case and `__dunder__` code isn't mangled.)

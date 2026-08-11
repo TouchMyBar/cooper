@@ -11,6 +11,7 @@ pub struct Db(pub Mutex<Connection>);
 pub struct Section {
     pub id: i64,
     pub name: String,
+    pub collapsed: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -63,6 +64,11 @@ pub fn init(path: &Path) -> rusqlite::Result<Connection> {
            value TEXT NOT NULL
          );",
     )?;
+    // Migration for pre-0.2 databases; harmless error if the column exists.
+    let _ = conn.execute(
+        "ALTER TABLE sections ADD COLUMN collapsed INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     Ok(conn)
 }
 
@@ -107,11 +113,12 @@ pub fn set_active_section(conn: &Connection, id: Option<i64>) -> rusqlite::Resul
 }
 
 pub fn list_sections(conn: &Connection) -> rusqlite::Result<Vec<Section>> {
-    let mut stmt = conn.prepare("SELECT id, name FROM sections ORDER BY id")?;
+    let mut stmt = conn.prepare("SELECT id, name, collapsed FROM sections ORDER BY id")?;
     let rows = stmt.query_map([], |r| {
         Ok(Section {
             id: r.get(0)?,
             name: r.get(1)?,
+            collapsed: r.get::<_, i64>(2)? != 0,
         })
     })?;
     rows.collect()

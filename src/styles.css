@@ -234,6 +234,31 @@ kbd {
   color: var(--accent);
 }
 
+.group-name:hover {
+  color: var(--text);
+}
+
+.group-name.active:hover {
+  color: var(--accent);
+}
+
+.group-tri {
+  font-size: 8px;
+  width: 10px;
+  color: var(--muted);
+  display: inline-block;
+}
+
+.group-count {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--faint);
+  border-radius: 999px;
+  padding: 1px 7px;
+  letter-spacing: 0;
+}
+
 .active-dot {
   width: 5px;
   height: 5px;
@@ -624,6 +649,56 @@ kbd {
   gap: 4px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+/* ============ file drop overlay ============ */
+.drop-overlay {
+  position: fixed;
+  inset: 10px;
+  z-index: 120;
+  border-radius: var(--radius-panel);
+  background: color-mix(in srgb, var(--bg-solid) 55%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+:root[data-glass="1"] .drop-overlay {
+  inset: 0;
+}
+
+.drop-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 22px 30px;
+  border-radius: 16px;
+  background: var(--card);
+  box-shadow: var(--shadow-pop);
+  border: 1.5px dashed var(--accent);
+}
+
+.drop-plus {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 32px;
+  text-align: center;
+}
+
+.drop-title {
+  font-weight: 700;
+}
+
+.drop-sub {
+  font-size: 11px;
+  color: var(--muted);
 }
 
 /* ============ toast ============ */

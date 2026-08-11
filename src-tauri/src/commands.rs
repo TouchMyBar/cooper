@@ -27,10 +27,28 @@ pub fn add_entry(app: AppHandle, db: State<db::Db>, content: String) -> CmdResul
         return Ok(());
     }
     let conn = db.0.lock().map_err(err)?;
-    if let Some(name) = text.strip_prefix("# ") {
+    if let Some(name) = text.strip_prefix("## ") {
+        // "## Name" starts a fresh workspace: the new section becomes active and
+        // everything else collapses out of the active area.
         let name = name.trim();
         if !name.is_empty() {
             let id = db::find_or_create_section(&conn, name).map_err(err)?;
+            conn.execute(
+                "UPDATE sections SET collapsed = CASE WHEN id = ?1 THEN 0 ELSE 1 END",
+                rusqlite::params![id],
+            )
+            .map_err(err)?;
+            db::set_active_section(&conn, Some(id)).map_err(err)?;
+        }
+    } else if let Some(name) = text.strip_prefix("# ") {
+        let name = name.trim();
+        if !name.is_empty() {
+            let id = db::find_or_create_section(&conn, name).map_err(err)?;
+            conn.execute(
+                "UPDATE sections SET collapsed = 0 WHERE id = ?1",
+                rusqlite::params![id],
+            )
+            .map_err(err)?;
             db::set_active_section(&conn, Some(id)).map_err(err)?;
         }
     } else {
@@ -91,10 +109,54 @@ pub fn clear_completed(app: AppHandle, db: State<db::Db>) -> CmdResult<()> {
 #[tauri::command]
 pub fn set_active_section(app: AppHandle, db: State<db::Db>, id: Option<i64>) -> CmdResult<()> {
     let conn = db.0.lock().map_err(err)?;
+    if let Some(id) = id {
+        conn.execute(
+            "UPDATE sections SET collapsed = 0 WHERE id = ?1",
+            rusqlite::params![id],
+        )
+        .map_err(err)?;
+    }
     db::set_active_section(&conn, id).map_err(err)?;
     drop(conn);
     refresh(&app);
     Ok(())
+}
+
+#[tauri::command]
+pub fn set_section_collapsed(
+    app: AppHandle,
+    db: State<db::Db>,
+    id: i64,
+    collapsed: bool,
+) -> CmdResult<()> {
+    let conn = db.0.lock().map_err(err)?;
+    conn.execute(
+        "UPDATE sections SET collapsed = ?2 WHERE id = ?1",
+        rusqlite::params![id, collapsed as i64],
+    )
+    .map_err(err)?;
+    drop(conn);
+    refresh(&app);
+    Ok(())
+}
+
+/// Add dropped files as one item per path in the active section. Returns how
+/// many were added.
+#[tauri::command]
+pub fn add_files(app: AppHandle, db: State<db::Db>, paths: Vec<String>) -> CmdResult<usize> {
+    let conn = db.0.lock().map_err(err)?;
+    let active = db::get_active_section(&conn);
+    let mut added = 0;
+    for path in &paths {
+        let path = path.trim();
+        if !path.is_empty() {
+            db::insert_item(&conn, path, active).map_err(err)?;
+            added += 1;
+        }
+    }
+    drop(conn);
+    refresh(&app);
+    Ok(added)
 }
 
 #[tauri::command]

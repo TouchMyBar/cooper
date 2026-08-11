@@ -1,4 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, useAppState } from "../store";
 import type { Item, Section } from "../types";
@@ -13,6 +14,8 @@ const MOD = IS_MAC ? "⌘" : "Ctrl";
 interface Group {
   section: Section | null;
   items: Item[];
+  collapsed: boolean;
+  total: number;
 }
 
 export default function Panel() {
@@ -30,6 +33,7 @@ export default function Panel() {
   const [showHelp, setShowHelp] = useState(false);
   const [appMenu, setAppMenu] = useState<{ x: number; y: number } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [dropCount, setDropCount] = useState<number | null>(null);
 
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -51,6 +55,30 @@ export default function Panel() {
     return () => unlisteners.forEach((f) => f());
   }, [flashToast]);
 
+  // OS file drag & drop onto the panel: Tauri intercepts native drops and
+  // reports absolute paths, so this works from Explorer/Finder/file managers.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    getCurrentWebviewWindow()
+      .onDragDropEvent((event) => {
+        if (event.payload.type === "enter") {
+          setDropCount(event.payload.paths.length);
+        } else if (event.payload.type === "leave") {
+          setDropCount(null);
+        } else if (event.payload.type === "drop") {
+          setDropCount(null);
+          const paths = event.payload.paths;
+          if (paths.length) {
+            api.addFiles(paths).then((added) => {
+              flashToast(`Added ${added} file${added === 1 ? "" : "s"}`);
+            });
+          }
+        }
+      })
+      .then((f) => (unlisten = f));
+    return () => unlisten?.();
+  }, [flashToast]);
+
   const sections = state?.sections ?? [];
   const items = state?.items ?? [];
   const activeSectionId = state?.activeSectionId ?? null;
@@ -61,12 +89,24 @@ export default function Panel() {
     const match = (i: Item) => !q || i.content.toLowerCase().includes(q);
     const result: Group[] = [];
     const unfiled = items.filter((i) => i.sectionId === null && match(i));
-    if (unfiled.length) result.push({ section: null, items: unfiled });
+    if (unfiled.length)
+      result.push({ section: null, items: unfiled, collapsed: false, total: unfiled.length });
     for (const s of sections) {
       const inSection = items.filter((i) => i.sectionId === s.id && match(i));
-      // Show an empty section header only when it's the active target (and not searching).
-      if (inSection.length || (!q && s.id === activeSectionId)) {
-        result.push({ section: s, items: inSection });
+      // Searching expands everything that matches; otherwise collapsed sections
+      // stay listed as compressed one-line dropdowns.
+      const collapsed = !q && s.collapsed;
+      if (q) {
+        if (inSection.length) {
+          result.push({ section: s, items: inSection, collapsed: false, total: inSection.length });
+        }
+      } else {
+        result.push({
+          section: s,
+          items: collapsed ? [] : inSection,
+          collapsed,
+          total: inSection.length,
+        });
       }
     }
     return result;
@@ -404,17 +444,18 @@ export default function Panel() {
                       onBlur={() => setRenamingSection(null)}
                     />
                   ) : (
-                    <span
+                    <button
                       className={`group-name${g.section.id === activeSectionId ? " active" : ""}`}
-                      title={
-                        g.section.id === activeSectionId
-                          ? "New captures land here"
-                          : "Right-click for options"
-                      }
+                      title={g.collapsed ? "Expand" : "Collapse"}
+                      onClick={() => api.setSectionCollapsed(g.section!.id, !g.collapsed)}
                     >
+                      <span className="group-tri">{g.collapsed ? "▸" : "▾"}</span>
                       {g.section.id === activeSectionId && <span className="active-dot" />}
                       {g.section.name}
-                    </span>
+                      {g.collapsed && g.total > 0 && (
+                        <span className="group-count">{g.total}</span>
+                      )}
+                    </button>
                   )}
                   <span className="group-rule" />
                 </div>
@@ -438,7 +479,7 @@ export default function Panel() {
                   onEditCancel={() => setEditingId(null)}
                 />
               ))}
-              {g.section && g.items.length === 0 && (
+              {g.section && !g.collapsed && g.total === 0 && (
                 <div className="group-empty">Captures will land here</div>
               )}
             </div>
@@ -450,6 +491,21 @@ export default function Panel() {
       </div>
 
       {toast && <div className="toast">{toast}</div>}
+
+      {dropCount !== null && (
+        <div className="drop-overlay">
+          <div className="drop-card">
+            <div className="drop-plus">+</div>
+            <div className="drop-title">
+              Add {dropCount} {dropCount === 1 ? "file" : "files"}
+            </div>
+            <div className="drop-sub">
+              {items.filter((i) => i.sectionId === activeSectionId).length} already in{" "}
+              {activeSection ? activeSection.name : "Inbox"}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="composer">
         <span className="composer-circle" />
@@ -470,7 +526,13 @@ export default function Panel() {
             }
           }}
         />
-        {input.startsWith("#") && <span className="composer-hint">creates a section</span>}
+        {input.startsWith("#") && (
+          <span className="composer-hint">
+            {input.startsWith("##")
+              ? "starts a fresh section — others collapse"
+              : "creates a section"}
+          </span>
+        )}
       </div>
 
       {itemMenu && (

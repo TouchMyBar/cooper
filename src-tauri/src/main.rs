@@ -28,6 +28,8 @@ fn main() {
             commands::delete_item,
             commands::clear_completed,
             commands::set_active_section,
+            commands::set_section_collapsed,
+            commands::add_files,
             commands::create_section,
             commands::rename_section,
             commands::delete_section,

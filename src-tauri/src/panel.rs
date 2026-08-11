@@ -1,5 +1,38 @@
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 
+/// On Windows, hiding an always-on-top window does not reliably hand focus
+/// back, so we remember the foreground window before taking focus and restore
+/// it on hide. macOS (accessory app) and Linux WMs return focus on their own.
+#[cfg(windows)]
+mod foreground {
+    use std::sync::atomic::{AtomicIsize, Ordering};
+
+    static LAST: AtomicIsize = AtomicIsize::new(0);
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetForegroundWindow() -> isize;
+        fn SetForegroundWindow(hwnd: isize) -> i32;
+    }
+
+    pub fn remember() {
+        unsafe { LAST.store(GetForegroundWindow(), Ordering::Relaxed) }
+    }
+
+    pub fn restore() {
+        let hwnd = LAST.swap(0, Ordering::Relaxed);
+        if hwnd != 0 {
+            unsafe { SetForegroundWindow(hwnd) };
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod foreground {
+    pub fn remember() {}
+    pub fn restore() {}
+}
+
 /// Dock the panel to the right edge of the monitor it's on, vertically centered.
 pub fn position(win: &WebviewWindow) {
     let monitor = match win.current_monitor() {
@@ -24,6 +57,9 @@ pub fn position(win: &WebviewWindow) {
 
 pub fn show(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
+        if !win.is_focused().unwrap_or(false) {
+            foreground::remember();
+        }
         position(&win);
         let _ = win.show();
         let _ = win.set_focus();
@@ -34,6 +70,7 @@ pub fn show(app: &AppHandle) {
 pub fn hide(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.hide();
+        foreground::restore();
     }
 }
 
@@ -43,7 +80,9 @@ pub fn toggle(app: &AppHandle) {
         let focused = win.is_focused().unwrap_or(false);
         if visible && focused {
             let _ = win.hide();
+            foreground::restore();
         } else if visible {
+            foreground::remember();
             let _ = win.set_focus();
             let _ = app.emit("panel-shown", ());
         } else {

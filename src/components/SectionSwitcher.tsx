@@ -95,8 +95,8 @@ export default function SectionSwitcher({
           {rows.length === 0 && <div className="switcher-empty">No sections</div>}
         </div>
         <div className="switcher-hint">
-          Capture and new notes go to the selected section · Type <b># Name</b> in the
-          input to create one inline
+          Capture and new notes go to the selected section · <b># Name</b> creates one
+          inline · <b>## Name</b> starts fresh and collapses the rest
         </div>
       </div>
     </div>

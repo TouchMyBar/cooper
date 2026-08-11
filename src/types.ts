@@ -1,6 +1,7 @@
 export interface Section {
   id: number;
   name: string;
+  collapsed: boolean;
 }
 
 export interface Item {
