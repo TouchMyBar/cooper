@@ -1,5 +1,4 @@
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, useAppState } from "../store";
 import type { Item, Section } from "../types";
@@ -10,6 +9,39 @@ import ShortcutsSheet from "./ShortcutsSheet";
 
 const IS_MAC = navigator.userAgent.includes("Mac");
 const MOD = IS_MAC ? "⌘" : "Ctrl";
+
+// Read a Blob into (base64, ext) for handing raw image bytes to the backend.
+function readImageBlob(blob: Blob): Promise<{ base64: string; ext: string }> {
+  const ext = (blob.type.split("/")[1] || "png").replace("jpeg", "jpg").split("+")[0];
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error);
+    reader.onload = () => {
+      // strip the "data:*/*;base64," prefix
+      const result = String(reader.result);
+      resolve({ base64: result.slice(result.indexOf(",") + 1), ext });
+    };
+    reader.readAsDataURL(blob);
+  });
+}
+
+// Pull every image out of a DataTransfer (covers both file-manager files and
+// image data dragged from a browser or another app).
+function imageBlobsFrom(dt: DataTransfer): Blob[] {
+  const blobs: Blob[] = [];
+  for (const file of Array.from(dt.files)) {
+    if (file.type.startsWith("image/")) blobs.push(file);
+  }
+  if (blobs.length === 0) {
+    for (const item of Array.from(dt.items)) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        const f = item.getAsFile();
+        if (f) blobs.push(f);
+      }
+    }
+  }
+  return blobs;
+}
 
 interface Group {
   section: Section | null;
@@ -55,29 +87,101 @@ export default function Panel() {
     return () => unlisteners.forEach((f) => f());
   }, [flashToast]);
 
-  // OS file drag & drop onto the panel: Tauri intercepts native drops and
-  // reports absolute paths, so this works from Explorer/Finder/file managers.
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    getCurrentWebviewWindow()
-      .onDragDropEvent((event) => {
-        if (event.payload.type === "enter") {
-          setDropCount(event.payload.paths.length);
-        } else if (event.payload.type === "leave") {
-          setDropCount(null);
-        } else if (event.payload.type === "drop") {
-          setDropCount(null);
-          const paths = event.payload.paths;
-          if (paths.length) {
-            api.addFiles(paths).then((added) => {
-              flashToast(`Added ${added} file${added === 1 ? "" : "s"}`);
-            });
-          }
+  // Save a batch of image blobs, showing a single summary toast.
+  const saveImageBlobs = useCallback(
+    async (blobs: Blob[]) => {
+      let added = 0;
+      for (const blob of blobs) {
+        try {
+          const { base64, ext } = await readImageBlob(blob);
+          added += await api.addImage(base64, ext);
+        } catch (e) {
+          console.error("image save failed", e);
         }
-      })
-      .then((f) => (unlisten = f));
-    return () => unlisten?.();
-  }, [flashToast]);
+      }
+      if (added) flashToast(`Added ${added} image${added === 1 ? "" : "s"}`);
+      return added;
+    },
+    [flashToast],
+  );
+
+  // HTML5 drag & drop (native OS drop is disabled so we get image *bytes*, which
+  // works for file managers, browsers and screenshots alike — and lets us keep
+  // the cursor in "copy" state instead of the OS "not allowed" badge).
+  useEffect(() => {
+    const dragCount = (dt: DataTransfer | null) => {
+      if (!dt) return 0;
+      if (dt.files.length) return dt.files.length;
+      return Array.from(dt.items).filter((i) => i.kind === "file").length;
+    };
+    const onDragOver = (e: DragEvent) => {
+      if (!e.dataTransfer) return;
+      const hasFiles = Array.from(e.dataTransfer.types).includes("Files");
+      if (!hasFiles) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+      // Some sources (e.g. browser image drags) only expose the count on drop,
+      // so fall back to 1 rather than showing 0 during hover.
+      setDropCount((c) => c ?? (dragCount(e.dataTransfer) || 1));
+    };
+    const onDragLeave = (e: DragEvent) => {
+      // Only clear when the pointer actually leaves the window.
+      if (e.relatedTarget === null && e.clientX <= 0 && e.clientY <= 0) setDropCount(null);
+      else if (e.relatedTarget === null) setDropCount(null);
+    };
+    const onDrop = async (e: DragEvent) => {
+      if (!e.dataTransfer) return;
+      e.preventDefault();
+      setDropCount(null);
+      const blobs = imageBlobsFrom(e.dataTransfer);
+      if (blobs.length) {
+        await saveImageBlobs(blobs);
+        return;
+      }
+      // Non-image drops: fall back to dropped text / filenames as notes.
+      const text = e.dataTransfer.getData("text/plain").trim();
+      const names = Array.from(e.dataTransfer.files).map((f) => f.name);
+      const lines = text ? [text] : names;
+      let added = 0;
+      for (const line of lines) {
+        if (line.trim()) {
+          await api.addEntry(line.trim());
+          added++;
+        }
+      }
+      if (added) flashToast(`Added ${added} item${added === 1 ? "" : "s"}`);
+    };
+    window.addEventListener("dragover", onDragOver);
+    window.addEventListener("dragleave", onDragLeave);
+    window.addEventListener("drop", onDrop);
+    return () => {
+      window.removeEventListener("dragover", onDragOver);
+      window.removeEventListener("dragleave", onDragLeave);
+      window.removeEventListener("drop", onDrop);
+    };
+  }, [saveImageBlobs, flashToast]);
+
+  // Paste (Ctrl/Cmd+V) an image anywhere in the panel → capture it. Text paste
+  // into the composer is left untouched.
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const dt = e.clipboardData;
+      if (!dt) return;
+      const blobs: Blob[] = [];
+      for (const item of Array.from(dt.items)) {
+        if (item.kind === "file" && item.type.startsWith("image/")) {
+          const f = item.getAsFile();
+          if (f) blobs.push(f);
+        }
+      }
+      if (blobs.length) {
+        e.preventDefault();
+        saveImageBlobs(blobs);
+      }
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [saveImageBlobs]);
 
   const sections = state?.sections ?? [];
   const items = state?.items ?? [];
@@ -115,6 +219,13 @@ export default function Panel() {
   const flatIds = useMemo(() => groups.flatMap((g) => g.items.map((i) => i.id)), [groups]);
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items]);
 
+  const copyImage = useCallback(
+    (item: Item) => {
+      api.copyImage(item.content).then(() => flashToast("Image copied"));
+    },
+    [flashToast],
+  );
+
   const copySelection = useCallback(
     (asList: boolean, ids?: number[]) => {
       const targets = (ids ?? selected)
@@ -123,12 +234,23 @@ export default function Panel() {
         .map((id) => itemById.get(id))
         .filter((i): i is Item => !!i);
       if (!targets.length) return;
+      // A lone image copies as a real image; otherwise copy the text items' text.
+      if (targets.length === 1 && targets[0].kind === "image") {
+        copyImage(targets[0]);
+        return;
+      }
+      const textItems = targets.filter((i) => i.kind !== "image");
+      if (!textItems.length) {
+        // Multiple images selected — copy the first as an image.
+        copyImage(targets[0]);
+        return;
+      }
       const text = asList
-        ? targets.map((i) => `- ${i.content.replace(/\n/g, "\n  ")}`).join("\n")
-        : targets.map((i) => i.content).join("\n\n");
+        ? textItems.map((i) => `- ${i.content.replace(/\n/g, "\n  ")}`).join("\n")
+        : textItems.map((i) => i.content).join("\n\n");
       api.copyText(text).then(() => flashToast(asList ? "Copied as list" : "Copied"));
     },
-    [selected, flatIds, itemById, flashToast],
+    [selected, flatIds, itemById, flashToast, copyImage],
   );
 
   const deleteIds = useCallback(
@@ -262,8 +384,13 @@ export default function Panel() {
     const targets = ids.map((id) => itemById.get(id)).filter((i): i is Item => !!i);
     const allDone = targets.every((i) => i.done);
     const single = targets.length === 1;
+    const singleImage = single && targets[0].kind === "image";
     return [
-      { label: "Copy", kbd: `${MOD} C`, onClick: () => copySelection(false, ids) },
+      {
+        label: singleImage ? "Copy Image" : "Copy",
+        kbd: `${MOD} C`,
+        onClick: () => copySelection(false, ids),
+      },
       { label: "Copy as List", kbd: `${MOD} ⇧ C`, onClick: () => copySelection(true, ids) },
       {
         label: allDone ? "Mark as Not Done" : "Mark as Done",
@@ -274,14 +401,14 @@ export default function Panel() {
       {
         label: "Edit",
         kbd: "↵",
-        disabled: !single,
-        onClick: () => single && setEditingId(ids[0]),
+        disabled: !single || singleImage,
+        onClick: () => single && !singleImage && setEditingId(ids[0]),
       },
       {
         label: "Edit in New Window",
         kbd: `${MOD} ↵`,
-        disabled: !single,
-        onClick: () => single && api.openEditor(ids[0]),
+        disabled: !single || singleImage,
+        onClick: () => single && !singleImage && api.openEditor(ids[0]),
       },
       {
         label: targets.length > 1 ? `Delete ${targets.length} items` : "Delete",
@@ -469,7 +596,7 @@ export default function Panel() {
                   onClick={(e) => onItemClick(e, item.id)}
                   onContextMenu={(e) => onItemContextMenu(e, item.id)}
                   onToggleDone={() => api.toggleDone(item.id)}
-                  onDoubleClick={() => setEditingId(item.id)}
+                  onDoubleClick={() => item.kind !== "image" && setEditingId(item.id)}
                   onEditSave={async (content) => {
                     if (content.trim() && content !== item.content) {
                       await api.updateItem(item.id, content);
@@ -477,6 +604,7 @@ export default function Panel() {
                     setEditingId(null);
                   }}
                   onEditCancel={() => setEditingId(null)}
+                  onCopyImage={() => copyImage(item)}
                 />
               ))}
               {g.section && !g.collapsed && g.total === 0 && (

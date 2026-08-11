@@ -86,12 +86,28 @@ pub fn update_item(app: AppHandle, db: State<db::Db>, id: i64, content: String) 
     Ok(())
 }
 
+/// Collect the on-disk paths of image items matching a WHERE clause, so their
+/// backing files can be removed alongside the rows.
+fn image_files(conn: &rusqlite::Connection, where_sql: &str, id: i64) -> Vec<String> {
+    let sql = format!("SELECT content FROM items WHERE kind = 'image' AND {where_sql}");
+    conn.prepare(&sql)
+        .and_then(|mut stmt| {
+            stmt.query_map(rusqlite::params![id], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap_or_default()
+}
+
 #[tauri::command]
 pub fn delete_item(app: AppHandle, db: State<db::Db>, id: i64) -> CmdResult<()> {
     let conn = db.0.lock().map_err(err)?;
+    let files = image_files(&conn, "id = ?1", id);
     conn.execute("DELETE FROM items WHERE id = ?1", rusqlite::params![id])
         .map_err(err)?;
     drop(conn);
+    for f in files {
+        let _ = std::fs::remove_file(f);
+    }
     refresh(&app);
     Ok(())
 }
@@ -99,9 +115,19 @@ pub fn delete_item(app: AppHandle, db: State<db::Db>, id: i64) -> CmdResult<()> 
 #[tauri::command]
 pub fn clear_completed(app: AppHandle, db: State<db::Db>) -> CmdResult<()> {
     let conn = db.0.lock().map_err(err)?;
+    let files: Vec<String> = conn
+        .prepare("SELECT content FROM items WHERE kind = 'image' AND done = 1")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap_or_default();
     conn.execute("DELETE FROM items WHERE done = 1", [])
         .map_err(err)?;
     drop(conn);
+    for f in files {
+        let _ = std::fs::remove_file(f);
+    }
     refresh(&app);
     Ok(())
 }
@@ -140,23 +166,139 @@ pub fn set_section_collapsed(
     Ok(())
 }
 
-/// Add dropped files as one item per path in the active section. Returns how
-/// many were added.
+const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tiff", "avif"];
+
+fn ext_of(name: &str) -> String {
+    name.rsplit('.')
+        .next()
+        .map(|e| e.to_ascii_lowercase())
+        .filter(|e| e != name)
+        .unwrap_or_default()
+}
+
+fn is_image_ext(ext: &str) -> bool {
+    IMAGE_EXTS.contains(&ext)
+}
+
+fn images_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app.path().app_data_dir().map_err(err)?.join("images");
+    std::fs::create_dir_all(&dir).map_err(err)?;
+    Ok(dir)
+}
+
+/// Monotonic suffix so rapid pastes/drops in the same millisecond never collide.
+fn unique_name(ext: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let ext = if is_image_ext(ext) { ext } else { "png" };
+    format!("{}-{}.{}", db::now_ms(), n, ext)
+}
+
+fn mime_for(ext: &str) -> &'static str {
+    match ext {
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        "tiff" => "image/tiff",
+        "avif" => "image/avif",
+        _ => "image/png",
+    }
+}
+
+/// Add dropped file paths as items in the active section. Image files are copied
+/// into the app's images/ dir and stored as image items; other files keep their
+/// path as a text item. Returns how many were added.
 #[tauri::command]
 pub fn add_files(app: AppHandle, db: State<db::Db>, paths: Vec<String>) -> CmdResult<usize> {
-    let conn = db.0.lock().map_err(err)?;
-    let active = db::get_active_section(&conn);
+    let active = {
+        let conn = db.0.lock().map_err(err)?;
+        db::get_active_section(&conn)
+    };
     let mut added = 0;
     for path in &paths {
         let path = path.trim();
-        if !path.is_empty() {
+        if path.is_empty() {
+            continue;
+        }
+        let ext = ext_of(path);
+        if is_image_ext(&ext) {
+            let dest = images_dir(&app)?.join(unique_name(&ext));
+            if std::fs::copy(path, &dest).is_ok() {
+                let conn = db.0.lock().map_err(err)?;
+                db::insert_image_item(&conn, &dest.to_string_lossy(), active).map_err(err)?;
+                added += 1;
+            }
+        } else {
+            let conn = db.0.lock().map_err(err)?;
             db::insert_item(&conn, path, active).map_err(err)?;
             added += 1;
         }
     }
-    drop(conn);
     refresh(&app);
     Ok(added)
+}
+
+/// Store raw image bytes (from a paste or an HTML5 drop) as an image item.
+/// `data_base64` is the standard-base64 file contents; `ext` is the source
+/// extension (defaults to png when unknown). Returns the new item count (1).
+#[tauri::command]
+pub fn add_image(
+    app: AppHandle,
+    db: State<db::Db>,
+    data_base64: String,
+    ext: String,
+) -> CmdResult<usize> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.trim())
+        .map_err(err)?;
+    if bytes.is_empty() {
+        return Ok(0);
+    }
+    let dest = images_dir(&app)?.join(unique_name(&ext.to_ascii_lowercase()));
+    std::fs::write(&dest, &bytes).map_err(err)?;
+    let active = {
+        let conn = db.0.lock().map_err(err)?;
+        db::get_active_section(&conn)
+    };
+    let conn = db.0.lock().map_err(err)?;
+    db::insert_image_item(&conn, &dest.to_string_lossy(), active).map_err(err)?;
+    drop(conn);
+    refresh(&app);
+    Ok(1)
+}
+
+/// Return a data: URL for an image item so the webview can display it without
+/// needing filesystem/asset-protocol scope.
+#[tauri::command]
+pub fn image_data(path: String) -> CmdResult<String> {
+    use base64::Engine;
+    let bytes = std::fs::read(&path).map_err(err)?;
+    let mime = mime_for(&ext_of(&path));
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(format!("data:{mime};base64,{b64}"))
+}
+
+/// Copy an image item back onto the system clipboard as a real image, so it can
+/// be pasted into any other app.
+#[tauri::command]
+pub fn copy_image(path: String) -> CmdResult<()> {
+    let img = image::open(&path)
+        .map_err(|_| "This image format can't be copied to the clipboard".to_string())?
+        .to_rgba8();
+    let (w, h) = img.dimensions();
+    let data = arboard::ImageData {
+        width: w as usize,
+        height: h as usize,
+        bytes: std::borrow::Cow::Owned(img.into_raw()),
+    };
+    arboard::Clipboard::new()
+        .map_err(err)?
+        .set_image(data)
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -229,8 +371,15 @@ pub fn export_markdown(app: AppHandle, db: State<db::Db>) -> CmdResult<String> {
     let write_items = |md: &mut String, section_id: Option<i64>| {
         for item in state.items.iter().filter(|i| i.section_id == section_id) {
             let mark = if item.done { "x" } else { " " };
-            let content = item.content.replace('\n', "\n  ");
-            md.push_str(&format!("- [{mark}] {content}\n"));
+            if item.kind == "image" {
+                // Embed as a relative Markdown image link next to the export.
+                let name = item.content.replace('\\', "/");
+                let name = name.rsplit('/').next().unwrap_or(&item.content);
+                md.push_str(&format!("- [{mark}] ![image](images/{name})\n"));
+            } else {
+                let content = item.content.replace('\n', "\n  ");
+                md.push_str(&format!("- [{mark}] {content}\n"));
+            }
         }
     };
     if state.items.iter().any(|i| i.section_id.is_none()) {

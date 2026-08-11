@@ -14,6 +14,10 @@ export const api = {
   setSectionCollapsed: (id: number, collapsed: boolean) =>
     invoke("set_section_collapsed", { id, collapsed }),
   addFiles: (paths: string[]) => invoke<number>("add_files", { paths }),
+  addImage: (dataBase64: string, ext: string) =>
+    invoke<number>("add_image", { dataBase64, ext }),
+  imageData: (path: string) => invoke<string>("image_data", { path }),
+  copyImage: (path: string) => invoke("copy_image", { path }),
   createSection: (name: string) => invoke<number>("create_section", { name }),
   renameSection: (id: number, name: string) => invoke("rename_section", { id, name }),
   deleteSection: (id: number) => invoke("delete_section", { id }),
@@ -24,6 +28,21 @@ export const api = {
   hidePanel: () => invoke("hide_panel"),
   openEditor: (id: number) => invoke("open_editor", { id }),
 };
+
+// Image items store a stable file path; the data URL for a given path never
+// changes, so cache it to avoid re-reading the file on every state refresh.
+const imageCache = new Map<string, Promise<string>>();
+export function imageDataCached(path: string): Promise<string> {
+  let p = imageCache.get(path);
+  if (!p) {
+    p = api.imageData(path).catch((e) => {
+      imageCache.delete(path); // let a later render retry
+      throw e;
+    });
+    imageCache.set(path, p);
+  }
+  return p;
+}
 
 export function applyTheme(theme: string) {
   const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;

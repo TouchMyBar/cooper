@@ -79,10 +79,12 @@ First-run notes:
   rename, delete, or retarget captures. Type `## Name` to start **fresh**: the
   new section becomes the active area and everything else collapses upward
   into compressed one-line dropdowns (click the `▸` to expand, or just search).
-- **Drag & drop files** — drop files or screenshots from your file manager
-  onto the panel; each becomes an item holding its path, ready to paste into a
-  prompt. While hovering you get a Finder-style `+` badge with how many you're
-  adding and how many are already in the active section.
+- **Images & files** — drag images or screenshots from your file manager, a
+  browser, or another app onto the panel, or just **paste** them with
+  `Ctrl/Cmd+V`. Images are stored in Cooper's own folder and shown as
+  thumbnails in the list; **click a thumbnail to copy the image back to your
+  clipboard** for pasting anywhere. Dropping non-image files or text adds them
+  as notes. While hovering you get a Finder-style `+` badge with the count.
 - **Focus hand-back** — hiding Cooper with `Esc` returns focus to the app you
   were working in.
 - **Inline formatting** — cards render `**bold**`, `*italic*`,

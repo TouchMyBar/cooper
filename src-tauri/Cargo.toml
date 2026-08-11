@@ -1,6 +1,6 @@
 [package]
 name = "cooper"
-version = "0.2.0"
+version = "0.2.1"
 description = "Cooper — a FOSS capture panel for AI-assisted work"
 authors = ["Cooper contributors"]
 license = "Apache-2.0"
@@ -19,6 +19,11 @@ serde_json = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 arboard = "3"
 window-vibrancy = "0.6"
+base64 = "0.22"
+# Only used to decode stored images back to RGBA for clipboard copy-out; display
+# uses data: URLs the webview decodes itself, so this needs just the common
+# formats. (gif's required dep version is absent from the registry, so it's out.)
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
 enigo = "0.2"
 rdev = "0.5"
 

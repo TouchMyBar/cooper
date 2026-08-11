@@ -1,6 +1,38 @@
 import { useEffect, useRef, useState } from "react";
 import { renderInline } from "../markdown";
+import { imageDataCached } from "../store";
 import type { Item } from "../types";
+
+function ImageBody({ item, onCopy }: { item: Item; onCopy: () => void }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    imageDataCached(item.content)
+      .then((s) => alive && setSrc(s))
+      .catch(() => alive && setFailed(true));
+    return () => {
+      alive = false;
+    };
+  }, [item.content]);
+
+  if (failed) return <div className="card-content card-image-missing">Image unavailable</div>;
+  if (!src) return <div className="card-image-loading" />;
+  return (
+    <img
+      className="card-image"
+      src={src}
+      alt="captured"
+      draggable={false}
+      title="Click to copy image"
+      onClick={(e) => {
+        e.stopPropagation();
+        onCopy();
+      }}
+    />
+  );
+}
 
 interface Props {
   item: Item;
@@ -12,6 +44,7 @@ interface Props {
   onEditSave: (content: string) => void;
   onEditCancel: () => void;
   onDoubleClick: () => void;
+  onCopyImage: () => void;
 }
 
 export default function ItemCard({
@@ -24,6 +57,7 @@ export default function ItemCard({
   onEditSave,
   onEditCancel,
   onDoubleClick,
+  onCopyImage,
 }: Props) {
   const [draft, setDraft] = useState(item.content);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -41,9 +75,11 @@ export default function ItemCard({
     }
   }, [editing, item.content]);
 
+  const isImage = item.kind === "image";
   const classes = ["card"];
   if (selected) classes.push("selected");
   if (item.done) classes.push("done");
+  if (isImage) classes.push("card-image-item");
 
   return (
     <div
@@ -75,7 +111,9 @@ export default function ItemCard({
           </svg>
         )}
       </button>
-      {editing ? (
+      {isImage ? (
+        <ImageBody item={item} onCopy={onCopyImage} />
+      ) : editing ? (
         <textarea
           ref={taRef}
           className="card-edit"

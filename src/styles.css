@@ -357,6 +357,46 @@ kbd {
   cursor: default;
 }
 
+.card-image-item {
+  padding: 6px;
+  align-items: center;
+}
+
+.card-image {
+  flex: 1;
+  min-width: 0;
+  max-height: 220px;
+  border-radius: 8px;
+  object-fit: contain;
+  object-position: left center;
+  display: block;
+  cursor: zoom-in;
+  background: var(--faint);
+}
+
+.card-image-loading {
+  flex: 1;
+  height: 72px;
+  border-radius: 8px;
+  background: linear-gradient(90deg, var(--faint), var(--card-hover), var(--faint));
+  background-size: 200% 100%;
+  animation: shimmer 1.2s infinite;
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.card-image-missing {
+  color: var(--muted);
+  font-style: italic;
+}
+
 .md-code {
   font-family: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
   font-size: 0.92em;

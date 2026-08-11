@@ -8,6 +8,8 @@ export interface Item {
   id: number;
   sectionId: number | null;
   content: string;
+  /** "text" or "image"; for images `content` is the absolute file path. */
+  kind: string;
   done: boolean;
   createdAt: number;
   updatedAt: number;

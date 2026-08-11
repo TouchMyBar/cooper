@@ -20,6 +20,8 @@ pub struct Item {
     pub id: i64,
     pub section_id: Option<i64>,
     pub content: String,
+    /// "text" or "image". For images, `content` holds the absolute file path.
+    pub kind: String,
     pub done: bool,
     pub created_at: i64,
     pub updated_at: i64,
@@ -64,9 +66,13 @@ pub fn init(path: &Path) -> rusqlite::Result<Connection> {
            value TEXT NOT NULL
          );",
     )?;
-    // Migration for pre-0.2 databases; harmless error if the column exists.
+    // Migrations for older databases; harmless error if the column exists.
     let _ = conn.execute(
         "ALTER TABLE sections ADD COLUMN collapsed INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE items ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'",
         [],
     );
     Ok(conn)
@@ -126,16 +132,17 @@ pub fn list_sections(conn: &Connection) -> rusqlite::Result<Vec<Section>> {
 
 pub fn list_items(conn: &Connection) -> rusqlite::Result<Vec<Item>> {
     let mut stmt = conn.prepare(
-        "SELECT id, section_id, content, done, created_at, updated_at FROM items ORDER BY id",
+        "SELECT id, section_id, content, kind, done, created_at, updated_at FROM items ORDER BY id",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok(Item {
             id: r.get(0)?,
             section_id: r.get(1)?,
             content: r.get(2)?,
-            done: r.get::<_, i64>(3)? != 0,
-            created_at: r.get(4)?,
-            updated_at: r.get(5)?,
+            kind: r.get(3)?,
+            done: r.get::<_, i64>(4)? != 0,
+            created_at: r.get(5)?,
+            updated_at: r.get(6)?,
         })
     })?;
     rows.collect()
@@ -153,8 +160,22 @@ pub fn get_state(conn: &Connection) -> rusqlite::Result<AppState> {
 pub fn insert_item(conn: &Connection, content: &str, section_id: Option<i64>) -> rusqlite::Result<i64> {
     let t = now_ms();
     conn.execute(
-        "INSERT INTO items(section_id, content, done, created_at, updated_at) VALUES(?1, ?2, 0, ?3, ?3)",
+        "INSERT INTO items(section_id, content, kind, done, created_at, updated_at) VALUES(?1, ?2, 'text', 0, ?3, ?3)",
         params![section_id, content, t],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Insert an image item; `path` is the absolute path of the stored image file.
+pub fn insert_image_item(
+    conn: &Connection,
+    path: &str,
+    section_id: Option<i64>,
+) -> rusqlite::Result<i64> {
+    let t = now_ms();
+    conn.execute(
+        "INSERT INTO items(section_id, content, kind, done, created_at, updated_at) VALUES(?1, ?2, 'image', 0, ?3, ?3)",
+        params![section_id, path, t],
     )?;
     Ok(conn.last_insert_rowid())
 }
