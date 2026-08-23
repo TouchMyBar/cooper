@@ -4,6 +4,8 @@ mod capture;
 mod commands;
 mod db;
 mod glass;
+#[cfg(target_os = "macos")]
+mod mac_tap;
 mod panel;
 mod tray;
 
@@ -68,10 +70,11 @@ fn main() {
 
             tray::create(app.handle())?;
             capture::register_fallback_shortcuts(app.handle());
-            // The raw rdev keyboard listener crashes (SIGTRAP in HIToolbox) on
-            // macOS, so it's disabled there; the fallback shortcuts still work.
+            // rdev everywhere except macOS, which uses its own CGEventTap.
             #[cfg(not(target_os = "macos"))]
             capture::start_double_shift_listener(app.handle().clone());
+            #[cfg(target_os = "macos")]
+            mac_tap::start(app.handle().clone());
 
             if let Some(win) = app.get_webview_window("main") {
                 panel::position(&win);

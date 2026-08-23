@@ -1,5 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_os = "macos"))]
+use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{db, panel};
@@ -7,14 +9,12 @@ use crate::{db, panel};
 /// Marker written to the clipboard before simulating copy, so we can tell
 /// "nothing was selected" apart from "the same text was copied again".
 const SENTINEL: &str = "\u{200B}cooper::capturing\u{200B}";
-#[cfg(not(target_os = "macos"))]
-const TAP_WINDOW: Duration = Duration::from_millis(400);
-#[cfg(not(target_os = "macos"))]
-const HOLD_LIMIT: Duration = Duration::from_millis(500);
+/// Shared by both listeners: the rdev one below and the macOS tap in `mac_tap`.
+pub(crate) const TAP_WINDOW: Duration = Duration::from_millis(400);
+pub(crate) const HOLD_LIMIT: Duration = Duration::from_millis(500);
 
-#[cfg(not(target_os = "macos"))]
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Side {
+pub(crate) enum Side {
     Left,
     Right,
 }

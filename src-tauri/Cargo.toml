@@ -26,10 +26,16 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
 enigo = "0.2"
 
-# The raw keyboard listener (double-shift capture) is disabled on macOS because
-# rdev's event tap crashes there, so rdev isn't a macOS dependency at all.
+# rdev drives the raw keyboard listener (double-shift capture) everywhere except
+# macOS, where it crashes (SIGTRAP in HIToolbox) decoding characters off-thread.
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 rdev = "0.5"
+
+# macOS runs its own listen-only CGEventTap instead (see src/mac_tap.rs). Both
+# crates are already in the tree via tauri/window-vibrancy, so this adds no build.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.25"
+core-foundation = "0.10"
 
 [profile.release]
 panic = "abort"
