@@ -27,20 +27,13 @@ pub fn add_entry(app: AppHandle, db: State<db::Db>, content: String) -> CmdResul
         return Ok(());
     }
     let conn = db.0.lock().map_err(err)?;
-    if let Some(name) = text.strip_prefix("## ") {
-        // "## Name" starts a fresh workspace: the new section becomes active and
-        // everything else collapses out of the active area.
-        let name = name.trim();
-        if !name.is_empty() {
-            let id = db::find_or_create_section(&conn, name).map_err(err)?;
-            conn.execute(
-                "UPDATE sections SET collapsed = CASE WHEN id = ?1 THEN 0 ELSE 1 END",
-                rusqlite::params![id],
-            )
-            .map_err(err)?;
-            db::set_active_section(&conn, Some(id)).map_err(err)?;
-        }
-    } else if let Some(name) = text.strip_prefix("# ") {
+    // "# Name" and "## Name" both create/switch to a section and expand ONLY that
+    // section (the terminal-clear scroll is a UI concern; we never collapse others).
+    let section_prefix = text
+        .strip_prefix("## ")
+        .or_else(|| text.strip_prefix("# "));
+    let mut added_item = false;
+    if let Some(name) = section_prefix {
         let name = name.trim();
         if !name.is_empty() {
             let id = db::find_or_create_section(&conn, name).map_err(err)?;
@@ -54,9 +47,13 @@ pub fn add_entry(app: AppHandle, db: State<db::Db>, content: String) -> CmdResul
     } else {
         let active = db::get_active_section(&conn);
         db::insert_item(&conn, text, active).map_err(err)?;
+        added_item = true;
     }
     drop(conn);
     refresh(&app);
+    if added_item {
+        let _ = app.emit("note-added", ());
+    }
     Ok(())
 }
 
@@ -86,22 +83,13 @@ pub fn update_item(app: AppHandle, db: State<db::Db>, id: i64, content: String) 
     Ok(())
 }
 
-/// Collect the on-disk paths of image items matching a WHERE clause, so their
-/// backing files can be removed alongside the rows.
-fn image_files(conn: &rusqlite::Connection, where_sql: &str, id: i64) -> Vec<String> {
-    let sql = format!("SELECT content FROM items WHERE kind = 'image' AND {where_sql}");
-    conn.prepare(&sql)
-        .and_then(|mut stmt| {
-            stmt.query_map(rusqlite::params![id], |r| r.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()
-        })
-        .unwrap_or_default()
-}
-
 #[tauri::command]
 pub fn delete_item(app: AppHandle, db: State<db::Db>, id: i64) -> CmdResult<()> {
     let conn = db.0.lock().map_err(err)?;
-    let files = image_files(&conn, "id = ?1", id);
+    // Gather every backing file in this item's branch (images + attachments)
+    // before the row (and its cascaded children/attachments) are deleted.
+    let mut files = db::subtree_image_files(&conn, id);
+    files.extend(db::subtree_attachment_files(&conn, id));
     conn.execute("DELETE FROM items WHERE id = ?1", rusqlite::params![id])
         .map_err(err)?;
     drop(conn);
@@ -115,15 +103,27 @@ pub fn delete_item(app: AppHandle, db: State<db::Db>, id: i64) -> CmdResult<()> 
 #[tauri::command]
 pub fn clear_completed(app: AppHandle, db: State<db::Db>) -> CmdResult<()> {
     let conn = db.0.lock().map_err(err)?;
-    let files: Vec<String> = conn
-        .prepare("SELECT content FROM items WHERE kind = 'image' AND done = 1")
+    // A done parent that still has an undone child is preserved (deleting it
+    // would take the undone child via CASCADE).
+    let deletable: Vec<i64> = conn
+        .prepare(
+            "SELECT id FROM items i WHERE i.done = 1
+               AND NOT EXISTS (SELECT 1 FROM items c WHERE c.parent_id = i.id AND c.done = 0)",
+        )
         .and_then(|mut stmt| {
-            stmt.query_map([], |r| r.get::<_, String>(0))?
+            stmt.query_map([], |r| r.get::<_, i64>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()
         })
         .unwrap_or_default();
-    conn.execute("DELETE FROM items WHERE done = 1", [])
-        .map_err(err)?;
+    let mut files = Vec::new();
+    for &id in &deletable {
+        files.extend(db::subtree_image_files(&conn, id));
+        files.extend(db::subtree_attachment_files(&conn, id));
+    }
+    for &id in &deletable {
+        // CASCADE removes any done descendants; a no-op if already gone.
+        let _ = conn.execute("DELETE FROM items WHERE id = ?1", rusqlite::params![id]);
+    }
     drop(conn);
     for f in files {
         let _ = std::fs::remove_file(f);
@@ -368,21 +368,44 @@ pub fn export_markdown(app: AppHandle, db: State<db::Db>) -> CmdResult<String> {
     drop(conn);
 
     let mut md = String::from("# Cooper export\n\n");
+    let basename = |content: &str| -> String {
+        let n = content.replace('\\', "/");
+        n.rsplit('/').next().unwrap_or(content).to_string()
+    };
+    // Write one item (+ its attachments) at the given indent.
+    let write_one = |md: &mut String, item: &db::Item, indent: &str| {
+        let mark = if item.done { "x" } else { " " };
+        if item.kind == "image" {
+            md.push_str(&format!(
+                "{indent}- [{mark}] ![image](images/{})\n",
+                basename(&item.content)
+            ));
+        } else {
+            let content = item.content.replace('\n', &format!("\n{indent}  "));
+            md.push_str(&format!("{indent}- [{mark}] {content}\n"));
+        }
+        for a in state.attachments.iter().filter(|a| a.item_id == item.id) {
+            md.push_str(&format!("{indent}  - ![image](images/{})\n", basename(&a.path)));
+        }
+    };
+    // Write a section's top-level items, nesting each item's branch children.
     let write_items = |md: &mut String, section_id: Option<i64>| {
-        for item in state.items.iter().filter(|i| i.section_id == section_id) {
-            let mark = if item.done { "x" } else { " " };
-            if item.kind == "image" {
-                // Embed as a relative Markdown image link next to the export.
-                let name = item.content.replace('\\', "/");
-                let name = name.rsplit('/').next().unwrap_or(&item.content);
-                md.push_str(&format!("- [{mark}] ![image](images/{name})\n"));
-            } else {
-                let content = item.content.replace('\n', "\n  ");
-                md.push_str(&format!("- [{mark}] {content}\n"));
+        for item in state
+            .items
+            .iter()
+            .filter(|i| i.section_id == section_id && i.parent_id.is_none())
+        {
+            write_one(md, item, "");
+            for child in state.items.iter().filter(|c| c.parent_id == Some(item.id)) {
+                write_one(md, child, "  ");
             }
         }
     };
-    if state.items.iter().any(|i| i.section_id.is_none()) {
+    if state
+        .items
+        .iter()
+        .any(|i| i.section_id.is_none() && i.parent_id.is_none())
+    {
         write_items(&mut md, None);
         md.push('\n');
     }
@@ -392,13 +415,40 @@ pub fn export_markdown(app: AppHandle, db: State<db::Db>) -> CmdResult<String> {
         md.push('\n');
     }
 
-    let dir = app
-        .path()
-        .resolve("", BaseDirectory::Document)
-        .map_err(err)?;
+    // Use the configured export folder if set and valid, else Documents.
+    let custom = {
+        let conn = db.0.lock().map_err(err)?;
+        db::get_setting(&conn, "export_dir").filter(|s| !s.is_empty())
+    };
+    let dir = match custom {
+        Some(d) if std::path::Path::new(&d).is_dir() => std::path::PathBuf::from(d),
+        _ => app.path().resolve("", BaseDirectory::Document).map_err(err)?,
+    };
     let path = dir.join("cooper-export.md");
     std::fs::write(&path, md).map_err(err)?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+/// Set (or clear, with "") the folder that Export to Markdown writes to.
+#[tauri::command]
+pub fn set_export_dir(db: State<db::Db>, path: String) -> CmdResult<()> {
+    let p = path.trim();
+    if !p.is_empty() && !std::path::Path::new(p).is_dir() {
+        return Err("That folder doesn't exist".into());
+    }
+    let conn = db.0.lock().map_err(err)?;
+    db::set_setting(&conn, "export_dir", p).map_err(err)
+}
+
+/// Persist the JSON map of shortcut overrides.
+#[tauri::command]
+pub fn set_keybinds(app: AppHandle, db: State<db::Db>, json: String) -> CmdResult<()> {
+    {
+        let conn = db.0.lock().map_err(err)?;
+        db::set_setting(&conn, "keybinds", json.trim()).map_err(err)?;
+    }
+    refresh(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -411,35 +461,253 @@ pub fn hide_panel(app: AppHandle) {
     panel::hide(&app);
 }
 
-#[tauri::command]
-pub fn open_editor(app: AppHandle, db: State<db::Db>, id: i64) -> CmdResult<()> {
-    let label = format!("editor-{id}");
-    if let Some(win) = app.get_webview_window(&label) {
-        let _ = win.set_focus();
-        return Ok(());
-    }
-    let win = tauri::WebviewWindowBuilder::new(
-        &app,
-        &label,
-        tauri::WebviewUrl::App(format!("index.html#/edit/{id}").into()),
-    )
-    .title("Edit — Cooper")
-    .inner_size(460.0, 360.0)
-    .min_inner_size(320.0, 240.0)
-    .decorations(false)
-    .transparent(true)
-    .shadow(false)
-    .always_on_top(true)
-    .center()
-    .build()
-    .map_err(err)?;
+// Editor and Draw windows are created from the frontend (see store.ts
+// openLabeledWindow) via the JS WebviewWindow API at origin "/", which reliably
+// loads the app; a Rust-built runtime window did not load the asset protocol.
 
-    let glass_on = {
-        let conn = db.0.lock().map_err(err)?;
-        db::get_setting(&conn, "theme").as_deref() == Some("glass")
-    };
-    if glass_on {
-        glass::apply(&win, true);
+/// Whether `url` is a plain https URL safe to hand to an OS opener as argv.
+/// Requires the https scheme, bounded length, and only ordinary URL characters —
+/// no whitespace, control chars, quotes, or shell metacharacters (`< > | ^ \``,
+/// backslash, quotes) that could break out of a command line or argv. The https
+/// prefix also rules out a leading `-` being read as a flag by the opener.
+fn is_safe_url(url: &str) -> bool {
+    url.starts_with("https://")
+        && url.len() <= 2048
+        && url
+            .chars()
+            .all(|c| c.is_ascii_graphic() && !matches!(c, '"' | '\'' | '`' | '<' | '>' | '|' | '^' | '\\'))
+}
+
+/// Open an https URL in the user's default browser. Never routes through a shell
+/// (`cmd.exe`), so URL characters are never re-interpreted as shell syntax.
+#[tauri::command]
+pub fn open_url(url: String) -> CmdResult<()> {
+    if !is_safe_url(&url) {
+        return Err("refused unsafe url".into());
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // rundll32 is not a shell; the URL is passed as a single argv to the
+        // system protocol handler via CreateProcess (no metacharacter parsing).
+        std::process::Command::new("rundll32.exe")
+            .arg("url.dll,FileProtocolHandler")
+            .arg(&url)
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW — no console flash
+            .spawn()
+            .map_err(err)?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("--")
+            .arg(&url)
+            .spawn()
+            .map_err(err)?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(err)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_update_check_enabled(app: AppHandle, db: State<db::Db>, enabled: bool) -> CmdResult<()> {
+    {
+        let conn = db.0.lock().map_err(err)?;
+        db::set_setting(&conn, "update_check_enabled", if enabled { "1" } else { "0" })
+            .map_err(err)?;
+    }
+    refresh(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_update_last_check(db: State<db::Db>, date: String) -> CmdResult<()> {
+    let conn = db.0.lock().map_err(err)?;
+    db::set_setting(&conn, "update_last_check", date.trim()).map_err(err)
+}
+
+/// Attach raw image bytes (paste/drop onto a note) to a text item; returns the
+/// new attachment id.
+#[tauri::command]
+pub fn attach_image(
+    app: AppHandle,
+    db: State<db::Db>,
+    item_id: i64,
+    data_base64: String,
+    ext: String,
+) -> CmdResult<i64> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.trim())
+        .map_err(err)?;
+    if bytes.is_empty() {
+        return Ok(0);
+    }
+    let dest = images_dir(&app)?.join(unique_name(&ext.to_ascii_lowercase()));
+    std::fs::write(&dest, &bytes).map_err(err)?;
+    let att_id = {
+        let conn = db.0.lock().map_err(err)?;
+        db::insert_attachment(&conn, item_id, &dest.to_string_lossy()).map_err(err)?
+    };
+    refresh(&app);
+    Ok(att_id)
+}
+
+/// Turn a standalone image item into a text note that keeps the image as an
+/// attachment (so the user can add a caption). The item id is preserved.
+#[tauri::command]
+pub fn add_note_to_image(app: AppHandle, db: State<db::Db>, id: i64) -> CmdResult<()> {
+    let conn = db.0.lock().map_err(err)?;
+    let path: Option<String> = conn
+        .query_row(
+            "SELECT content FROM items WHERE id = ?1 AND kind = 'image'",
+            rusqlite::params![id],
+            |r| r.get::<_, String>(0),
+        )
+        .ok();
+    if let Some(p) = path {
+        conn.execute(
+            "UPDATE items SET kind = 'text', content = '' WHERE id = ?1",
+            rusqlite::params![id],
+        )
+        .map_err(err)?;
+        db::insert_attachment(&conn, id, &p).map_err(err)?;
+    }
+    drop(conn);
+    refresh(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn detach_attachment(app: AppHandle, db: State<db::Db>, id: i64) -> CmdResult<()> {
+    let path: Option<String> = {
+        let conn = db.0.lock().map_err(err)?;
+        let p = conn
+            .query_row(
+                "SELECT path FROM attachments WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get::<_, String>(0),
+            )
+            .ok();
+        conn.execute("DELETE FROM attachments WHERE id = ?1", rusqlite::params![id])
+            .map_err(err)?;
+        p
+    };
+    if let Some(p) = path {
+        let _ = std::fs::remove_file(p);
+    }
+    refresh(&app);
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundPref {
+    pub choice: String,
+    pub custom: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundPrefs {
+    pub capture: SoundPref,
+    pub new_note: SoundPref,
+    pub volume: f64,
+}
+
+#[tauri::command]
+pub fn get_sound_prefs(db: State<db::Db>) -> CmdResult<SoundPrefs> {
+    let conn = db.0.lock().map_err(err)?;
+    let pref = |prefix: &str, default_choice: &str| SoundPref {
+        choice: db::get_setting(&conn, &format!("sound_{prefix}_choice"))
+            .unwrap_or_else(|| default_choice.to_string()),
+        custom: db::get_setting(&conn, &format!("sound_{prefix}_custom")).filter(|s| !s.is_empty()),
+    };
+    let volume = db::get_setting(&conn, "sound_volume")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.6);
+    Ok(SoundPrefs {
+        capture: pref("capture", "pop"),
+        new_note: pref("newnote", "none"),
+        volume,
+    })
+}
+
+#[tauri::command]
+pub fn set_sound_pref(
+    db: State<db::Db>,
+    event: String,
+    choice: String,
+    custom: Option<String>,
+) -> CmdResult<()> {
+    let conn = db.0.lock().map_err(err)?;
+    if event == "volume" {
+        return db::set_setting(&conn, "sound_volume", choice.trim()).map_err(err);
+    }
+    let prefix = match event.as_str() {
+        "capture" => "capture",
+        "newNote" => "newnote",
+        _ => return Err("unknown sound event".into()),
+    };
+    db::set_setting(&conn, &format!("sound_{prefix}_choice"), choice.trim()).map_err(err)?;
+    let custom = if choice == "custom" {
+        custom.unwrap_or_default()
+    } else {
+        String::new()
+    };
+    db::set_setting(&conn, &format!("sound_{prefix}_custom"), &custom).map_err(err)?;
+    Ok(())
+}
+
+/// Create a branch child (sub-point) under a parent item; returns the new id.
+#[tauri::command]
+pub fn add_child(app: AppHandle, db: State<db::Db>, parent_id: i64, content: String) -> CmdResult<i64> {
+    let id = {
+        let conn = db.0.lock().map_err(err)?;
+        let section_id: Option<i64> = conn
+            .query_row(
+                "SELECT section_id FROM items WHERE id = ?1",
+                rusqlite::params![parent_id],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .unwrap_or(None);
+        db::insert_child_item(&conn, content.trim(), parent_id, section_id).map_err(err)?
+    };
+    refresh(&app);
+    Ok(id)
+}
+
+#[tauri::command]
+pub fn set_branch_style(app: AppHandle, db: State<db::Db>, id: i64, style: String) -> CmdResult<()> {
+    if style != "inline" && style != "panel" {
+        return Err("invalid branch style".into());
+    }
+    let conn = db.0.lock().map_err(err)?;
+    conn.execute(
+        "UPDATE items SET branch_style = ?2 WHERE id = ?1",
+        rusqlite::params![id, style],
+    )
+    .map_err(err)?;
+    drop(conn);
+    refresh(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_item_collapsed(app: AppHandle, db: State<db::Db>, id: i64, collapsed: bool) -> CmdResult<()> {
+    let conn = db.0.lock().map_err(err)?;
+    conn.execute(
+        "UPDATE items SET collapsed = ?2 WHERE id = ?1",
+        rusqlite::params![id, collapsed as i64],
+    )
+    .map_err(err)?;
+    drop(conn);
+    refresh(&app);
     Ok(())
 }

@@ -15,6 +15,7 @@ const GROUPS: { title: string; rows: [string, string[]][] }[] = [
     title: "In Cooper",
     rows: [
       ["Switch section", [`${MOD} K`]],
+      ["Create branch", [`${MOD} B`]],
       ["Copy selected", [`${MOD} C`]],
       ["Copy as list", [`${MOD} ⇧ C`]],
       ["Mark as done", ["Space"]],

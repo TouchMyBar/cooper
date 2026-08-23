@@ -481,16 +481,6 @@ kbd {
   border-color: color-mix(in srgb, var(--accent) 65%, #b48ce8);
 }
 
-.composer-circle {
-  flex-shrink: 0;
-  width: 17px;
-  height: 17px;
-  margin-top: 1px;
-  border-radius: 50%;
-  border: 1.5px solid var(--muted);
-  opacity: 0.55;
-}
-
 .composer textarea {
   flex: 1;
   min-width: 0;
@@ -741,6 +731,196 @@ kbd {
   color: var(--muted);
 }
 
+/* ============ settings ============ */
+.settings-section-title {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 4px 2px 8px;
+}
+
+/* Grouped card of rows, matching Cooper's card surfaces. */
+.settings-card {
+  background: var(--card);
+  border-radius: 12px;
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 14px;
+  min-height: 44px;
+}
+
+.settings-div {
+  height: 0.5px;
+  background: var(--hairline);
+  margin-left: 14px;
+}
+
+.settings-label {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.settings-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* macOS-style popup button: a real <select> with native chrome removed and a
+   chevron overlaid, so the closed control matches the rest of the UI. */
+.popup {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.popup-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 84px;
+  justify-content: space-between;
+  padding: 5px 10px;
+  border-radius: 8px;
+  background: var(--faint);
+  border: 0.5px solid var(--hairline);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.popup-btn:hover {
+  background: var(--hairline);
+}
+
+.popup-chev {
+  color: var(--muted);
+  flex-shrink: 0;
+  display: block;
+}
+
+.settings-btn {
+  padding: 5px 9px;
+  border-radius: 8px;
+  background: var(--faint);
+  color: var(--text);
+  font-size: 11px;
+}
+
+.settings-btn:hover {
+  background: var(--hairline);
+}
+
+.settings-preview {
+  min-width: 28px;
+}
+
+.settings-path {
+  font-size: 11px;
+  color: var(--muted);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: right;
+}
+
+.popup-btn.recording {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.sheet-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+/* A full-width settings row that acts as a link/button (e.g. "Edit shortcuts"). */
+.settings-link {
+  width: 100%;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-link:hover {
+  background: var(--card-hover);
+}
+
+.settings-chev {
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.settings-note {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 8px 2px 0;
+}
+
+/* ============ update banner ============ */
+.update-banner {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 12px 6px;
+  padding: 8px 10px 8px 12px;
+  border-radius: 11px;
+  background: var(--accent-soft);
+  border: 0.5px solid var(--hairline);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.update-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-download {
+  padding: 4px 12px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  font-size: 11px;
+}
+
+.update-download:hover {
+  filter: brightness(1.08);
+}
+
+.update-dismiss {
+  color: var(--muted);
+  padding: 2px 4px;
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.update-dismiss:hover {
+  background: var(--faint);
+  color: var(--text);
+}
+
 /* ============ toast ============ */
 .toast {
   position: fixed;
@@ -839,4 +1019,293 @@ kbd {
 
 .btn.primary:hover {
   filter: brightness(1.08);
+}
+
+/* ============ composer + button ============ */
+.composer-add {
+  flex-shrink: 0;
+  width: 19px;
+  height: 19px;
+  margin-top: 1px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1.5px solid var(--muted);
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.75;
+}
+.composer-add svg {
+  display: block;
+}
+.composer-add:hover {
+  opacity: 1;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ============ mixed-note attachments ============ */
+.card-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.card-main > .card-image {
+  width: 100%;
+}
+.card-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.attachment-thumb-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.attachment-thumb {
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: 7px;
+  background: var(--faint);
+  cursor: pointer;
+  display: block;
+}
+.attachment-loading {
+  background: var(--card-hover);
+}
+.attachment-del {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--text);
+  color: var(--bg-solid);
+  font-size: 9px;
+  line-height: 16px;
+  text-align: center;
+  opacity: 0;
+  transition: opacity 0.1s ease;
+}
+.attachment-thumb-wrap:hover .attachment-del {
+  opacity: 1;
+}
+
+/* ============ branches ============ */
+.branch-tri {
+  flex-shrink: 0;
+  width: 13px;
+  margin-top: 2px;
+  font-size: 9px;
+  color: var(--muted);
+  background: none;
+}
+.branch-tri:hover {
+  color: var(--text);
+}
+.branch-open {
+  flex-shrink: 0;
+  align-self: center;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--faint);
+  border-radius: 999px;
+  padding: 2px 9px;
+}
+.branch-open:hover {
+  background: var(--hairline);
+  color: var(--text);
+}
+.branch-children {
+  margin: 2px 0 2px 26px;
+  border-left: 1.5px solid var(--hairline);
+  padding-left: 6px;
+}
+.card.is-child {
+  margin: 4px 0;
+}
+
+/* ============ terminal-clear spacer ============ */
+.board-spacer {
+  flex-shrink: 0;
+}
+
+/* ============ branch side panel ============ */
+.branch-pane {
+  position: fixed;
+  top: 10px;
+  right: 10px;
+  bottom: 10px;
+  width: min(320px, calc(100% - 40px));
+  display: flex;
+  flex-direction: column;
+  background: var(--card);
+  border-radius: 14px;
+  box-shadow: var(--shadow-pop);
+  border: 0.5px solid var(--hairline);
+  overflow: hidden;
+  animation: pane-in 0.12s ease-out;
+}
+@keyframes pane-in {
+  from {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+}
+:root[data-glass="1"] .branch-pane {
+  backdrop-filter: blur(14px) saturate(1.3);
+  background: color-mix(in srgb, var(--bg-solid) 60%, transparent);
+}
+.branch-pane-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 12px 8px;
+  border-bottom: 0.5px solid var(--hairline);
+}
+.branch-pane-title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.branch-pane-inline {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 3px 8px;
+  border-radius: 7px;
+  background: var(--faint);
+}
+.branch-pane-inline:hover {
+  background: var(--hairline);
+  color: var(--text);
+}
+.branch-pane-close {
+  color: var(--muted);
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+.branch-pane-close:hover {
+  background: var(--faint);
+  color: var(--text);
+}
+.branch-pane-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.branch-child-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 9px;
+  background: var(--card-hover);
+}
+.branch-child-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+input.branch-child-text {
+  background: var(--faint);
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+.branch-child-del {
+  color: var(--muted);
+  font-size: 10px;
+  padding: 2px 4px;
+  border-radius: 5px;
+}
+.branch-child-row:hover .branch-child-del {
+  color: var(--danger);
+}
+
+/* ============ drawing window ============ */
+.draw-window {
+  position: relative;
+  height: 100%;
+  background: #ffffff;
+  overflow: hidden;
+}
+.draw-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: #ffffff;
+  touch-action: none;
+  cursor: crosshair;
+}
+.draw-save {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  z-index: 6;
+  padding: 6px 16px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  font-size: 12px;
+  box-shadow: var(--shadow-card);
+}
+.draw-save:hover {
+  filter: brightness(1.08);
+}
+.draw-toolbar {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px;
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: var(--shadow-pop);
+  border: 0.5px solid rgba(0, 0, 0, 0.12);
+}
+.draw-tool {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  color: #333;
+  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.draw-tool:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+.draw-tool.active {
+  background: var(--accent);
+  color: #fff;
+}
+.draw-color {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  background: none;
+  border-radius: 6px;
+  cursor: pointer;
 }

@@ -1,7 +1,7 @@
 {
   "name": "cooper",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.3.0",
   "type": "module",
   "license": "Apache-2.0",
   "repository": {
@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.4.0",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

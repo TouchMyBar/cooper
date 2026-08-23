@@ -25,6 +25,23 @@ pub struct Item {
     pub done: bool,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Non-null when this item is a sub-point (branch child) of another item.
+    pub parent_id: Option<i64>,
+    /// How a parent's branch is shown: "inline" (nested) or "panel" (side pane).
+    pub branch_style: String,
+    /// Inline-branch collapsed state (mirrors Section.collapsed).
+    pub collapsed: bool,
+}
+
+/// An image attached to a text item (a "mixed note").
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Attachment {
+    pub id: i64,
+    pub item_id: i64,
+    /// Absolute path of the stored image file under app_data_dir/images.
+    pub path: String,
+    pub position: i64,
 }
 
 #[derive(Serialize, Clone)]
@@ -32,8 +49,16 @@ pub struct Item {
 pub struct AppState {
     pub sections: Vec<Section>,
     pub items: Vec<Item>,
+    pub attachments: Vec<Attachment>,
     pub active_section_id: Option<i64>,
     pub theme: String,
+    pub app_version: String,
+    pub update_check_enabled: bool,
+    pub last_update_check: String,
+    /// Custom export folder ("" = default Documents).
+    pub export_dir: String,
+    /// JSON map of action -> accelerator overrides ("{}" = all defaults).
+    pub keybinds: String,
 }
 
 pub fn now_ms() -> i64 {
@@ -75,6 +100,31 @@ pub fn init(path: &Path) -> rusqlite::Result<Connection> {
         "ALTER TABLE items ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'",
         [],
     );
+    // Branch columns (nullable FK is the only ADD COLUMN form SQLite allows with
+    // foreign_keys=ON; CASCADE fires because the pragma is set above).
+    let _ = conn.execute(
+        "ALTER TABLE items ADD COLUMN parent_id INTEGER REFERENCES items(id) ON DELETE CASCADE",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE items ADD COLUMN branch_style TEXT NOT NULL DEFAULT 'inline'",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE items ADD COLUMN collapsed INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    // Attachments (mixed notes): images bound to a text item. Idempotent.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS attachments(
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+           path TEXT NOT NULL,
+           position INTEGER NOT NULL DEFAULT 0,
+           created_at INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_attachments_item ON attachments(item_id);",
+    )?;
     Ok(conn)
 }
 
@@ -132,7 +182,7 @@ pub fn list_sections(conn: &Connection) -> rusqlite::Result<Vec<Section>> {
 
 pub fn list_items(conn: &Connection) -> rusqlite::Result<Vec<Item>> {
     let mut stmt = conn.prepare(
-        "SELECT id, section_id, content, kind, done, created_at, updated_at FROM items ORDER BY id",
+        "SELECT id, section_id, content, kind, done, created_at, updated_at, parent_id, branch_style, collapsed FROM items ORDER BY id",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok(Item {
@@ -143,6 +193,23 @@ pub fn list_items(conn: &Connection) -> rusqlite::Result<Vec<Item>> {
             done: r.get::<_, i64>(4)? != 0,
             created_at: r.get(5)?,
             updated_at: r.get(6)?,
+            parent_id: r.get(7)?,
+            branch_style: r.get(8)?,
+            collapsed: r.get::<_, i64>(9)? != 0,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn list_attachments(conn: &Connection) -> rusqlite::Result<Vec<Attachment>> {
+    let mut stmt =
+        conn.prepare("SELECT id, item_id, path, position FROM attachments ORDER BY item_id, position, id")?;
+    let rows = stmt.query_map([], |r| {
+        Ok(Attachment {
+            id: r.get(0)?,
+            item_id: r.get(1)?,
+            path: r.get(2)?,
+            position: r.get(3)?,
         })
     })?;
     rows.collect()
@@ -152,8 +219,16 @@ pub fn get_state(conn: &Connection) -> rusqlite::Result<AppState> {
     Ok(AppState {
         sections: list_sections(conn)?,
         items: list_items(conn)?,
+        attachments: list_attachments(conn)?,
         active_section_id: get_active_section(conn),
         theme: get_setting(conn, "theme").unwrap_or_else(|| "system".into()),
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        update_check_enabled: get_setting(conn, "update_check_enabled")
+            .map(|v| v != "0")
+            .unwrap_or(true),
+        last_update_check: get_setting(conn, "update_last_check").unwrap_or_default(),
+        export_dir: get_setting(conn, "export_dir").unwrap_or_default(),
+        keybinds: get_setting(conn, "keybinds").unwrap_or_else(|| "{}".into()),
     })
 }
 
@@ -178,6 +253,67 @@ pub fn insert_image_item(
         params![section_id, path, t],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+/// Insert a branch child (sub-point) under `parent_id`, inheriting its section.
+pub fn insert_child_item(
+    conn: &Connection,
+    content: &str,
+    parent_id: i64,
+    section_id: Option<i64>,
+) -> rusqlite::Result<i64> {
+    let t = now_ms();
+    conn.execute(
+        "INSERT INTO items(section_id, content, kind, done, created_at, updated_at, parent_id) VALUES(?1, ?2, 'text', 0, ?3, ?3, ?4)",
+        params![section_id, content, t, parent_id],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Attach an image (already written to disk at `path`) to a text item.
+pub fn insert_attachment(conn: &Connection, item_id: i64, path: &str) -> rusqlite::Result<i64> {
+    let pos: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM attachments WHERE item_id = ?1",
+            params![item_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    conn.execute(
+        "INSERT INTO attachments(item_id, path, position, created_at) VALUES(?1, ?2, ?3, ?4)",
+        params![item_id, path, pos, now_ms()],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Paths of the images stored across an item's whole branch (itself + descendants).
+pub fn subtree_image_files(conn: &Connection, root_id: i64) -> Vec<String> {
+    conn.prepare(
+        "WITH RECURSIVE sub(id) AS (
+           SELECT ?1 UNION ALL SELECT items.id FROM items JOIN sub ON items.parent_id = sub.id
+         )
+         SELECT content FROM items WHERE kind = 'image' AND id IN (SELECT id FROM sub)",
+    )
+    .and_then(|mut s| {
+        s.query_map(params![root_id], |r| r.get::<_, String>(0))?
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Paths of attachment images across an item's whole branch (itself + descendants).
+pub fn subtree_attachment_files(conn: &Connection, root_id: i64) -> Vec<String> {
+    conn.prepare(
+        "WITH RECURSIVE sub(id) AS (
+           SELECT ?1 UNION ALL SELECT items.id FROM items JOIN sub ON items.parent_id = sub.id
+         )
+         SELECT path FROM attachments WHERE item_id IN (SELECT id FROM sub)",
+    )
+    .and_then(|mut s| {
+        s.query_map(params![root_id], |r| r.get::<_, String>(0))?
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Find a section by name (case-insensitive) or create it. Returns its id.

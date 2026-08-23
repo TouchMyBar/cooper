@@ -7,9 +7,12 @@ use crate::{db, panel};
 /// Marker written to the clipboard before simulating copy, so we can tell
 /// "nothing was selected" apart from "the same text was copied again".
 const SENTINEL: &str = "\u{200B}cooper::capturing\u{200B}";
+#[cfg(not(target_os = "macos"))]
 const TAP_WINDOW: Duration = Duration::from_millis(400);
+#[cfg(not(target_os = "macos"))]
 const HOLD_LIMIT: Duration = Duration::from_millis(500);
 
+#[cfg(not(target_os = "macos"))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Side {
     Left,
@@ -18,8 +21,9 @@ enum Side {
 
 /// Global low-level keyboard listener: Left Shift x2 captures the current
 /// selection, Right Shift x2 toggles the panel. Runs on its own thread; if the
-/// OS denies the hook (e.g. missing macOS accessibility permission, Wayland),
-/// the fallback shortcuts registered below still work.
+/// OS denies the hook (e.g. Wayland), the fallback shortcuts still work.
+/// Disabled on macOS, where rdev's event tap crashes inside HIToolbox.
+#[cfg(not(target_os = "macos"))]
 pub fn start_double_shift_listener(app: AppHandle) {
     std::thread::spawn(move || {
         let mut pressed: Option<(Side, Instant)> = None;

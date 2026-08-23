@@ -20,6 +20,7 @@ fn main() {
             None,
         ))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::get_state,
             commands::add_entry,
@@ -41,7 +42,19 @@ fn main() {
             commands::export_markdown,
             commands::capture_now,
             commands::hide_panel,
-            commands::open_editor,
+            commands::open_url,
+            commands::set_update_check_enabled,
+            commands::set_update_last_check,
+            commands::attach_image,
+            commands::detach_attachment,
+            commands::add_note_to_image,
+            commands::set_export_dir,
+            commands::set_keybinds,
+            commands::get_sound_prefs,
+            commands::set_sound_pref,
+            commands::add_child,
+            commands::set_branch_style,
+            commands::set_item_collapsed,
         ])
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
@@ -55,6 +68,9 @@ fn main() {
 
             tray::create(app.handle())?;
             capture::register_fallback_shortcuts(app.handle());
+            // The raw rdev keyboard listener crashes (SIGTRAP in HIToolbox) on
+            // macOS, so it's disabled there; the fallback shortcuts still work.
+            #[cfg(not(target_os = "macos"))]
             capture::start_double_shift_listener(app.handle().clone());
 
             if let Some(win) = app.get_webview_window("main") {

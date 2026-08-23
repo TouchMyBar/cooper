@@ -1,6 +1,6 @@
 [package]
 name = "cooper"
-version = "0.2.1"
+version = "0.3.0"
 description = "Cooper — a FOSS capture panel for AI-assisted work"
 authors = ["Cooper contributors"]
 license = "Apache-2.0"
@@ -14,8 +14,8 @@ tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-ap
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 arboard = "3"
 window-vibrancy = "0.6"
@@ -25,6 +25,10 @@ base64 = "0.22"
 # formats. (gif's required dep version is absent from the registry, so it's out.)
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
 enigo = "0.2"
+
+# The raw keyboard listener (double-shift capture) is disabled on macOS because
+# rdev's event tap crashes there, so rdev isn't a macOS dependency at all.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
 rdev = "0.5"
 
 [profile.release]

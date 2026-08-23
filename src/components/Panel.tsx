@@ -1,11 +1,16 @@
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, useAppState } from "../store";
-import type { Item, Section } from "../types";
+import type { Attachment, Item, Section } from "../types";
+import BranchPanel from "./BranchPanel";
 import ContextMenu, { MenuEntry } from "./ContextMenu";
 import ItemCard from "./ItemCard";
 import SectionSwitcher from "./SectionSwitcher";
 import ShortcutsSheet from "./ShortcutsSheet";
+import SettingsSheet from "./SettingsSheet";
+import { runUpdateCheck } from "../update";
+import { loadSoundPrefs, play } from "../sounds";
+import { eventToAccel, resolveBinds } from "../keybinds";
 
 const IS_MAC = navigator.userAgent.includes("Mac");
 const MOD = IS_MAC ? "⌘" : "Ctrl";
@@ -66,9 +71,22 @@ export default function Panel() {
   const [appMenu, setAppMenu] = useState<{ x: number; y: number } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [dropCount, setDropCount] = useState<number | null>(null);
+  const [update, setUpdate] = useState<{ tag: string; url: string } | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [branchPaneId, setBranchPaneId] = useState<number | null>(null);
+  const [composerMenu, setComposerMenu] = useState<{ x: number; y: number } | null>(null);
+  const [spacerHeight, setSpacerHeight] = useState(0);
+  // True while navigating notes with Tab: Enter then copies the focused note
+  // (and a second Enter on the same note also marks it done).
+  const [tabMode, setTabMode] = useState(false);
+  const enterCopyRef = useRef<number | null>(null);
+  const updateCheckedRef = useRef(false);
 
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const activeGroupRef = useRef<HTMLDivElement>(null);
+  const prevActiveRef = useRef<number | null | undefined>(undefined);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const toastTimer = useRef<number>();
 
   const flashToast = useCallback((msg: string) => {
@@ -77,15 +95,45 @@ export default function Panel() {
     toastTimer.current = window.setTimeout(() => setToast(null), 2200);
   }, []);
 
-  // Focus the quick-add input whenever the panel is summoned; brief toast on capture.
+  // Drop straight into note-taking: focus the composer and put the caret at the
+  // end. Runs on the next frame so it works right as the window becomes visible.
+  const focusComposer = useCallback(() => {
+    setTabMode(false);
+    enterCopyRef.current = null;
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (!el) return;
+      el.focus();
+      const end = el.value.length;
+      el.setSelectionRange(end, end);
+    });
+  }, []);
+
+  // Focus the quick-add input whenever the panel is summoned; brief toast + sound
+  // on capture; sound on any new note.
   useEffect(() => {
+    loadSoundPrefs();
     const unlisteners: (() => void)[] = [];
-    listen("panel-shown", () => {
-      inputRef.current?.focus();
+    listen("panel-shown", () => focusComposer()).then((f) => unlisteners.push(f));
+    listen("captured", () => {
+      flashToast("Captured");
+      play("capture");
     }).then((f) => unlisteners.push(f));
-    listen("captured", () => flashToast("Captured")).then((f) => unlisteners.push(f));
+    listen("note-added", () => play("newNote")).then((f) => unlisteners.push(f));
     return () => unlisteners.forEach((f) => f());
-  }, [flashToast]);
+  }, [flashToast, focusComposer]);
+
+  // Also focus on first mount (e.g. the window is already visible at launch).
+  useEffect(() => {
+    focusComposer();
+  }, [focusComposer]);
+
+  // Once per launch, run the daily update check (the date gate lives in the DB).
+  useEffect(() => {
+    if (!state || updateCheckedRef.current) return;
+    updateCheckedRef.current = true;
+    runUpdateCheck(state, setUpdate);
+  }, [state]);
 
   // Save a batch of image blobs, showing a single summary toast.
   const saveImageBlobs = useCallback(
@@ -101,6 +149,25 @@ export default function Panel() {
       }
       if (added) flashToast(`Added ${added} image${added === 1 ? "" : "s"}`);
       return added;
+    },
+    [flashToast],
+  );
+
+  // Attach a batch of image blobs to an existing (text) note — a "mixed note".
+  const saveAttachments = useCallback(
+    async (itemId: number, blobs: Blob[]) => {
+      let n = 0;
+      for (const blob of blobs) {
+        try {
+          const { base64, ext } = await readImageBlob(blob);
+          await api.attachImage(itemId, base64, ext);
+          n++;
+        } catch (e) {
+          console.error("attach failed", e);
+        }
+      }
+      if (n) flashToast(`Attached ${n} image${n === 1 ? "" : "s"}`);
+      return n;
     },
     [flashToast],
   );
@@ -135,7 +202,17 @@ export default function Panel() {
       setDropCount(null);
       const blobs = imageBlobsFrom(e.dataTransfer);
       if (blobs.length) {
-        await saveImageBlobs(blobs);
+        // Dropping onto a text card attaches to it (mixed note); onto empty
+        // space (or an image card) creates standalone image notes.
+        const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+        const card = el?.closest("[data-item-id]") as HTMLElement | null;
+        const targetId = card ? Number(card.getAttribute("data-item-id")) : null;
+        const targetKind = card?.getAttribute("data-item-kind");
+        if (targetId != null && targetKind && targetKind !== "image") {
+          await saveAttachments(targetId, blobs);
+        } else {
+          await saveImageBlobs(blobs);
+        }
         return;
       }
       // Non-image drops: fall back to dropped text / filenames as notes.
@@ -159,7 +236,7 @@ export default function Panel() {
       window.removeEventListener("dragleave", onDragLeave);
       window.removeEventListener("drop", onDrop);
     };
-  }, [saveImageBlobs, flashToast]);
+  }, [saveImageBlobs, saveAttachments, flashToast]);
 
   // Paste (Ctrl/Cmd+V) an image anywhere in the panel → capture it. Text paste
   // into the composer is left untouched.
@@ -188,15 +265,43 @@ export default function Panel() {
   const activeSectionId = state?.activeSectionId ?? null;
   const activeSection = sections.find((s) => s.id === activeSectionId) ?? null;
 
+  // Branch children grouped by parent id (children are ordinary items).
+  const childrenByParent = useMemo(() => {
+    const m = new Map<number, Item[]>();
+    for (const i of items) {
+      if (i.parentId !== null) {
+        const arr = m.get(i.parentId) ?? [];
+        arr.push(i);
+        m.set(i.parentId, arr);
+      }
+    }
+    return m;
+  }, [items]);
+
+  // Image attachments grouped by the text item they belong to (mixed notes).
+  const attachmentsByItem = useMemo(() => {
+    const m = new Map<number, Attachment[]>();
+    for (const a of state?.attachments ?? []) {
+      const arr = m.get(a.itemId) ?? [];
+      arr.push(a);
+      m.set(a.itemId, arr);
+    }
+    return m;
+  }, [state?.attachments]);
+
   const groups = useMemo<Group[]>(() => {
     const q = query.trim().toLowerCase();
-    const match = (i: Item) => !q || i.content.toLowerCase().includes(q);
+    const matchText = (i: Item) => i.content.toLowerCase().includes(q);
+    // A top-level item matches search if it — or any of its children — matches.
+    const match = (i: Item) =>
+      !q || matchText(i) || (childrenByParent.get(i.id) ?? []).some(matchText);
+    const top = (i: Item) => i.parentId === null;
     const result: Group[] = [];
-    const unfiled = items.filter((i) => i.sectionId === null && match(i));
+    const unfiled = items.filter((i) => top(i) && i.sectionId === null && match(i));
     if (unfiled.length)
       result.push({ section: null, items: unfiled, collapsed: false, total: unfiled.length });
     for (const s of sections) {
-      const inSection = items.filter((i) => i.sectionId === s.id && match(i));
+      const inSection = items.filter((i) => top(i) && i.sectionId === s.id && match(i));
       // Searching expands everything that matches; otherwise collapsed sections
       // stay listed as compressed one-line dropdowns.
       const collapsed = !q && s.collapsed;
@@ -214,10 +319,52 @@ export default function Panel() {
       }
     }
     return result;
-  }, [items, sections, query, activeSectionId]);
+  }, [items, sections, query, activeSectionId, childrenByParent]);
 
-  const flatIds = useMemo(() => groups.flatMap((g) => g.items.map((i) => i.id)), [groups]);
+  // Visual order of item ids for keyboard nav/range-select: each top item, then
+  // its visible inline children.
+  const flatIds = useMemo(() => {
+    const ids: number[] = [];
+    for (const g of groups) {
+      for (const it of g.items) {
+        ids.push(it.id);
+        if (it.branchStyle === "inline" && !it.collapsed) {
+          for (const c of childrenByParent.get(it.id) ?? []) ids.push(c.id);
+        }
+      }
+    }
+    return ids;
+  }, [groups, childrenByParent]);
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items]);
+  const binds = useMemo(() => resolveBinds(state?.keybinds), [state?.keybinds]);
+  // Visual ids within the active section only — used for Tab cycling.
+  const activeFlatIds = useMemo(
+    () => flatIds.filter((id) => (itemById.get(id)?.sectionId ?? null) === activeSectionId),
+    [flatIds, itemById, activeSectionId],
+  );
+
+  // Terminal-style "clear the board": size a trailing spacer so the active
+  // section's header can scroll to the very top, leaving blank space below.
+  useLayoutEffect(() => {
+    if (query || !listRef.current || !activeGroupRef.current || activeSectionId === null) {
+      setSpacerHeight(0);
+      return;
+    }
+    const room = listRef.current.clientHeight - activeGroupRef.current.offsetHeight - 8;
+    setSpacerHeight(Math.max(0, room));
+  }, [activeSectionId, groups, query]);
+
+  // On a section create/switch (the "clear" moment) pin the active section to
+  // the top. Gated on the previous id so unrelated refreshes don't yank the view.
+  useLayoutEffect(() => {
+    if (query) {
+      prevActiveRef.current = activeSectionId;
+      return;
+    }
+    if (prevActiveRef.current === activeSectionId) return;
+    prevActiveRef.current = activeSectionId;
+    requestAnimationFrame(() => activeGroupRef.current?.scrollIntoView({ block: "start" }));
+  }, [activeSectionId, spacerHeight, query]);
 
   const copyImage = useCallback(
     (item: Item) => {
@@ -245,12 +392,29 @@ export default function Panel() {
         copyImage(targets[0]);
         return;
       }
+      // Include a parent's branch children as indented sub-bullets, skipping any
+      // child already in the selection to avoid duplication.
+      const selectedSet = new Set(textItems.map((i) => i.id));
+      const lineFor = (i: Item, indent: string) => {
+        let out = `${indent}- ${i.content.replace(/\n/g, `\n${indent}  `)}`;
+        for (const c of childrenByParent.get(i.id) ?? []) {
+          if (!selectedSet.has(c.id)) out += `\n${indent}  - ${c.content.replace(/\n/g, `\n${indent}    `)}`;
+        }
+        return out;
+      };
       const text = asList
-        ? textItems.map((i) => `- ${i.content.replace(/\n/g, "\n  ")}`).join("\n")
-        : textItems.map((i) => i.content).join("\n\n");
+        ? textItems.map((i) => lineFor(i, "")).join("\n")
+        : textItems
+            .map((i) => {
+              const kids = (childrenByParent.get(i.id) ?? []).filter((c) => !selectedSet.has(c.id));
+              return kids.length
+                ? `${i.content}\n${kids.map((c) => `- ${c.content}`).join("\n")}`
+                : i.content;
+            })
+            .join("\n\n");
       api.copyText(text).then(() => flashToast(asList ? "Copied as list" : "Copied"));
     },
-    [selected, flatIds, itemById, flashToast, copyImage],
+    [selected, flatIds, itemById, childrenByParent, flashToast, copyImage],
   );
 
   const deleteIds = useCallback(
@@ -262,7 +426,15 @@ export default function Panel() {
     [refresh],
   );
 
+  // Create a branch sub-point under a parent and drop straight into editing it.
+  const createChild = useCallback(async (parentId: number) => {
+    await api.setItemCollapsed(parentId, false);
+    const newId = await api.addChild(parentId, "");
+    setEditingId(newId);
+  }, []);
+
   const onItemClick = (e: React.MouseEvent, id: number) => {
+    setTabMode(false);
     if (e.ctrlKey || e.metaKey) {
       setSelected((sel) => (sel.includes(id) ? sel.filter((x) => x !== id) : [...sel, id]));
       setAnchor(id);
@@ -293,20 +465,21 @@ export default function Panel() {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
       const inField = target.tagName === "TEXTAREA" || target.tagName === "INPUT";
-      const mod = e.ctrlKey || e.metaKey;
+      const accel = eventToAccel(e);
 
-      if (mod && e.key.toLowerCase() === "k") {
+      if (accel && accel === binds.switchSection) {
         e.preventDefault();
         setShowSwitcher((v) => !v);
         return;
       }
-      if (mod && e.key === "/") {
+      if (accel && accel === binds.help) {
         e.preventDefault();
         setShowHelp((v) => !v);
         return;
       }
       if (e.key === "Escape") {
-        if (showHelp || showSwitcher || itemMenu || sectionMenu || appMenu) return; // overlays close themselves
+        if (showHelp || showSettings || showSwitcher || itemMenu || sectionMenu || appMenu)
+          return; // overlays close themselves
         if (editingId !== null) return;
         if (inField && (target as HTMLTextAreaElement).value) return;
         if (selected.length) {
@@ -318,8 +491,48 @@ export default function Panel() {
       }
       if (inField || editingId !== null || showSwitcher || showHelp) return;
 
+      if (e.key === "Tab") {
+        // Cycle through the active section's notes, wrapping back to the composer.
+        e.preventDefault();
+        if (!activeFlatIds.length) {
+          focusComposer();
+          return;
+        }
+        const cur = anchor !== null ? activeFlatIds.indexOf(anchor) : -1;
+        const step = e.shiftKey ? -1 : 1;
+        const nextIdx = cur === -1 ? (e.shiftKey ? activeFlatIds.length - 1 : 0) : cur + step;
+        if (nextIdx < 0 || nextIdx >= activeFlatIds.length) {
+          setSelected([]);
+          setAnchor(null);
+          focusComposer();
+          return;
+        }
+        const id = activeFlatIds[nextIdx];
+        setSelected([id]);
+        setAnchor(id);
+        setTabMode(true);
+        enterCopyRef.current = null;
+        document.querySelector(`[data-item-id="${id}"]`)?.scrollIntoView({ block: "nearest" });
+        return;
+      }
+      // In Tab mode: Enter copies the focused note; a second Enter on the same
+      // note also marks it done — so "Tab, Enter" grabs a note to the clipboard
+      // without opening Cooper's menus.
+      if (e.key === "Enter" && tabMode && selected.length === 1) {
+        e.preventDefault();
+        const id = selected[0];
+        if (enterCopyRef.current === id) {
+          api.toggleDone(id);
+          enterCopyRef.current = null;
+        } else {
+          copySelection(false, [id]);
+          enterCopyRef.current = id;
+        }
+        return;
+      }
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
+        setTabMode(false);
         if (!flatIds.length) return;
         const current = anchor !== null ? flatIds.indexOf(anchor) : -1;
         const next =
@@ -332,21 +545,30 @@ export default function Panel() {
         document
           .querySelector(`[data-item-id="${id}"]`)
           ?.scrollIntoView({ block: "nearest" });
-      } else if (e.key === " " && selected.length) {
+      } else if (accel && accel === binds.markDone && selected.length) {
         e.preventDefault();
         selected.forEach((id) => api.toggleDone(id));
-      } else if (e.key === "Enter" && selected.length === 1) {
-        e.preventDefault();
-        setEditingId(selected[0]);
-      } else if ((e.key === "Delete" || e.key === "Backspace") && selected.length) {
+      } else if (accel && accel === binds.edit && selected.length === 1) {
+        const it = itemById.get(selected[0]);
+        if (it && it.kind !== "image") {
+          e.preventDefault();
+          setEditingId(selected[0]);
+        }
+      } else if ((accel === binds.del || e.key === "Backspace") && selected.length) {
         e.preventDefault();
         deleteIds(selected);
-      } else if (mod && !e.shiftKey && e.key.toLowerCase() === "c" && selected.length) {
+      } else if (accel && accel === binds.copy && selected.length) {
         e.preventDefault();
         copySelection(false);
-      } else if (mod && e.shiftKey && e.key.toLowerCase() === "c" && selected.length) {
+      } else if (accel && accel === binds.copyList && selected.length) {
         e.preventDefault();
         copySelection(true);
+      } else if (accel && accel === binds.createBranch && selected.length === 1) {
+        const it = itemById.get(selected[0]);
+        if (it && it.kind !== "image" && it.parentId === null) {
+          e.preventDefault();
+          createChild(it.id);
+        }
       }
     };
     window.addEventListener("keydown", onKey);
@@ -358,11 +580,18 @@ export default function Panel() {
     editingId,
     showSwitcher,
     showHelp,
+    showSettings,
     itemMenu,
     sectionMenu,
     appMenu,
     copySelection,
     deleteIds,
+    createChild,
+    itemById,
+    binds,
+    activeFlatIds,
+    focusComposer,
+    tabMode,
   ]);
 
   const submitInput = async () => {
@@ -371,21 +600,34 @@ export default function Panel() {
     await api.addEntry(text);
     setInput("");
     if (inputRef.current) inputRef.current.style.height = "auto";
-    if (text.startsWith("# ")) {
-      flashToast(`Section “${text.slice(2).trim()}”`);
+    const isSection = text.startsWith("# ") || text.startsWith("## ");
+    if (isSection) {
+      flashToast(`Section “${text.replace(/^#{1,2}\s*/, "")}”`);
+      // the activeSectionId pin effect handles the scroll
     } else {
+      // Keep the newest note visible within the pinned active section (not the
+      // blank trailing spacer).
       requestAnimationFrame(() => {
-        listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
+        if (activeGroupRef.current) activeGroupRef.current.scrollIntoView({ block: "end" });
+        else listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
       });
     }
+    // Stay in note-taking mode after every add / section switch.
+    focusComposer();
   };
 
   const menuEntries = (ids: number[]): MenuEntry[] => {
     const targets = ids.map((id) => itemById.get(id)).filter((i): i is Item => !!i);
     const allDone = targets.every((i) => i.done);
     const single = targets.length === 1;
-    const singleImage = single && targets[0].kind === "image";
-    return [
+    const target = single ? targets[0] : null;
+    const singleImage = single && target!.kind === "image";
+    const isChild = single && target!.parentId !== null;
+    const canBranch = single && !singleImage && !isChild;
+    const hasChildren = single ? (childrenByParent.get(target!.id)?.length ?? 0) > 0 : false;
+    const panelStyle = single && target!.branchStyle === "panel";
+
+    const entries: MenuEntry[] = [
       {
         label: singleImage ? "Copy Image" : "Copy",
         kbd: `${MOD} C`,
@@ -398,26 +640,62 @@ export default function Panel() {
         separatorBefore: true,
         onClick: () => ids.forEach((id) => api.toggleDone(id)),
       },
-      {
+    ];
+
+    if (singleImage) {
+      // Turn an image into a captioned note, then edit the caption.
+      entries.push({
+        label: "Add Note",
+        onClick: async () => {
+          await api.addNoteToImage(ids[0]);
+          setEditingId(ids[0]);
+        },
+      });
+    } else {
+      entries.push({
         label: "Edit",
         kbd: "↵",
-        disabled: !single || singleImage,
-        onClick: () => single && !singleImage && setEditingId(ids[0]),
-      },
-      {
+        disabled: !single,
+        onClick: () => single && setEditingId(ids[0]),
+      });
+      entries.push({
         label: "Edit in New Window",
         kbd: `${MOD} ↵`,
-        disabled: !single || singleImage,
-        onClick: () => single && !singleImage && api.openEditor(ids[0]),
-      },
-      {
-        label: targets.length > 1 ? `Delete ${targets.length} items` : "Delete",
-        kbd: "Del",
-        danger: true,
+        disabled: !single,
+        onClick: () => single && api.openEditor(ids[0]),
+      });
+    }
+
+    if (canBranch) {
+      entries.push({
+        label: hasChildren ? "Add Sub-point" : "Create Branch",
+        kbd: `${MOD} B`,
         separatorBefore: true,
-        onClick: () => deleteIds(ids),
-      },
-    ];
+        onClick: () => createChild(target!.id),
+      });
+      if (hasChildren) {
+        entries.push({
+          label: panelStyle ? "Show Inline" : "Show as Side Panel",
+          onClick: async () => {
+            const next = panelStyle ? "inline" : "panel";
+            await api.setBranchStyle(target!.id, next);
+            if (next === "panel") setBranchPaneId(target!.id);
+          },
+        });
+        if (panelStyle) {
+          entries.push({ label: "Open Branch", onClick: () => setBranchPaneId(target!.id) });
+        }
+      }
+    }
+
+    entries.push({
+      label: targets.length > 1 ? `Delete ${targets.length} items` : "Delete",
+      kbd: "Del",
+      danger: true,
+      separatorBefore: true,
+      onClick: () => deleteIds(ids),
+    });
+    return entries;
   };
 
   const sectionMenuEntries = (id: number): MenuEntry[] => [
@@ -473,10 +751,64 @@ export default function Panel() {
         danger: true,
         onClick: () => api.clearCompleted(),
       },
-      { label: "Shortcuts", kbd: `${MOD} /`, separatorBefore: true, onClick: () => setShowHelp(true) },
+      {
+        label: state?.updateCheckEnabled === false ? "Enable update check" : "Disable update check",
+        separatorBefore: true,
+        onClick: async () => {
+          await api.setUpdateCheckEnabled(!(state?.updateCheckEnabled ?? true));
+        },
+      },
+      { label: "Settings…", onClick: () => setShowSettings(true) },
+      { label: "Shortcuts", kbd: `${MOD} /`, onClick: () => setShowHelp(true) },
     ];
   };
 
+  // Render one item card, plus its inline branch children (depth-capped at 1).
+  const renderItem = (item: Item, depth: number): React.ReactNode => {
+    const kids = childrenByParent.get(item.id) ?? [];
+    const hasKids = kids.length > 0;
+    const inlineBranch = depth === 0 && item.branchStyle === "inline";
+    const finishEdit = async (content: string) => {
+      const trimmed = content.trim();
+      if (!trimmed && item.parentId !== null && !item.content.trim()) {
+        await api.deleteItem(item.id); // discard an empty, freshly-created sub-point
+      } else if (trimmed && content !== item.content) {
+        await api.updateItem(item.id, content);
+      }
+      setEditingId(null);
+    };
+    return (
+      <div key={item.id}>
+        <ItemCard
+          item={item}
+          depth={depth}
+          selected={selected.includes(item.id)}
+          editing={editingId === item.id}
+          attachments={attachmentsByItem.get(item.id)}
+          hasChildren={hasKids}
+          childCount={kids.length}
+          branchCollapsed={item.collapsed}
+          branchStyle={item.branchStyle}
+          onClick={(e) => onItemClick(e, item.id)}
+          onContextMenu={(e) => onItemContextMenu(e, item.id)}
+          onToggleDone={() => api.toggleDone(item.id)}
+          onDoubleClick={() => item.kind !== "image" && setEditingId(item.id)}
+          onEditSave={finishEdit}
+          onEditCancel={() => finishEdit(item.content)}
+          onCopyImage={() => copyImage(item)}
+          onCopyAttachment={(path) => api.copyImage(path).then(() => flashToast("Image copied"))}
+          onDetach={(attId) => api.detachAttachment(attId).then(refresh)}
+          onToggleBranch={() => api.setItemCollapsed(item.id, !item.collapsed)}
+          onOpenBranchPane={() => setBranchPaneId(item.id)}
+        />
+        {inlineBranch && hasKids && !item.collapsed && (
+          <div className="branch-children">{kids.map((c) => renderItem(c, depth + 1))}</div>
+        )}
+      </div>
+    );
+  };
+
+  const branchPaneParent = branchPaneId != null ? itemById.get(branchPaneId) : undefined;
   const isEmpty = items.length === 0;
 
   return (
@@ -543,7 +875,11 @@ export default function Panel() {
           </div>
         ) : (
           groups.map((g) => (
-            <div key={g.section?.id ?? "unfiled"} className="group">
+            <div
+              key={g.section?.id ?? "unfiled"}
+              className="group"
+              ref={g.section && g.section.id === activeSectionId ? activeGroupRef : undefined}
+            >
               {g.section && (
                 <div
                   className="group-header"
@@ -587,26 +923,7 @@ export default function Panel() {
                   <span className="group-rule" />
                 </div>
               )}
-              {g.items.map((item) => (
-                <ItemCard
-                  key={item.id}
-                  item={item}
-                  selected={selected.includes(item.id)}
-                  editing={editingId === item.id}
-                  onClick={(e) => onItemClick(e, item.id)}
-                  onContextMenu={(e) => onItemContextMenu(e, item.id)}
-                  onToggleDone={() => api.toggleDone(item.id)}
-                  onDoubleClick={() => item.kind !== "image" && setEditingId(item.id)}
-                  onEditSave={async (content) => {
-                    if (content.trim() && content !== item.content) {
-                      await api.updateItem(item.id, content);
-                    }
-                    setEditingId(null);
-                  }}
-                  onEditCancel={() => setEditingId(null)}
-                  onCopyImage={() => copyImage(item)}
-                />
-              ))}
+              {g.items.map((item) => renderItem(item, 0))}
               {g.section && !g.collapsed && g.total === 0 && (
                 <div className="group-empty">Captures will land here</div>
               )}
@@ -615,6 +932,9 @@ export default function Panel() {
         )}
         {!isEmpty && query && flatIds.length === 0 && (
           <div className="no-results">No matches for “{query}”</div>
+        )}
+        {!query && spacerHeight > 0 && (
+          <div className="board-spacer" style={{ height: spacerHeight }} aria-hidden />
         )}
       </div>
 
@@ -635,8 +955,42 @@ export default function Panel() {
         </div>
       )}
 
+      {update && (
+        <div className="update-banner">
+          <span className="update-text">Cooper {update.tag} is available</span>
+          <button
+            className="update-download"
+            onClick={() => {
+              api.openUrl(update.url);
+              setUpdate(null);
+            }}
+          >
+            Download
+          </button>
+          <button className="update-dismiss" title="Dismiss" onClick={() => setUpdate(null)}>
+            ✕
+          </button>
+        </div>
+      )}
+
       <div className="composer">
-        <span className="composer-circle" />
+        <button
+          className="composer-add"
+          title="Attach or draw"
+          onClick={(e) => {
+            const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+            setComposerMenu({ x: r.left, y: r.top - 8 });
+          }}
+        >
+          <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden>
+            <path
+              d="M8 3.2 V12.8 M3.2 8 H12.8"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+            />
+          </svg>
+        </button>
         <textarea
           ref={inputRef}
           rows={1}
@@ -651,17 +1005,43 @@ export default function Panel() {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
               submitInput();
+            } else if (e.key === "Tab") {
+              // Tab from the composer jumps into the active section's notes.
+              e.preventDefault();
+              if (!activeFlatIds.length) return;
+              const id = e.shiftKey ? activeFlatIds[activeFlatIds.length - 1] : activeFlatIds[0];
+              setSelected([id]);
+              setAnchor(id);
+              setTabMode(true);
+              enterCopyRef.current = null;
+              inputRef.current?.blur();
+              document
+                .querySelector(`[data-item-id="${id}"]`)
+                ?.scrollIntoView({ block: "nearest" });
             }
           }}
         />
         {input.startsWith("#") && (
           <span className="composer-hint">
             {input.startsWith("##")
-              ? "starts a fresh section — others collapse"
+              ? "clears the board — scroll up for the rest"
               : "creates a section"}
           </span>
         )}
       </div>
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const blobs = Array.from(e.target.files ?? []);
+          e.target.value = "";
+          if (blobs.length) saveImageBlobs(blobs);
+        }}
+      />
 
       {itemMenu && (
         <ContextMenu
@@ -687,16 +1067,41 @@ export default function Panel() {
           onClose={() => setAppMenu(null)}
         />
       )}
+      {composerMenu && (
+        <ContextMenu
+          x={composerMenu.x}
+          y={composerMenu.y}
+          entries={[
+            { label: "Attach Images…", onClick: () => fileInputRef.current?.click() },
+            { label: "Create Drawing…", onClick: () => api.openDraw() },
+          ]}
+          onClose={() => setComposerMenu(null)}
+        />
+      )}
+      {branchPaneParent && (
+        <BranchPanel
+          parent={branchPaneParent}
+          children={childrenByParent.get(branchPaneParent.id) ?? []}
+          onClose={() => setBranchPaneId(null)}
+        />
+      )}
       {showSwitcher && (
         <SectionSwitcher
           sections={sections}
           activeSectionId={activeSectionId}
-          onSelect={(id) => api.setActiveSection(id)}
-          onCreate={(name) => api.createSection(name)}
+          onSelect={(id) => {
+            api.setActiveSection(id);
+            focusComposer();
+          }}
+          onCreate={(name) => {
+            api.createSection(name);
+            focusComposer();
+          }}
           onClose={() => setShowSwitcher(false)}
         />
       )}
       {showHelp && <ShortcutsSheet onClose={() => setShowHelp(false)} />}
+      {showSettings && <SettingsSheet onClose={() => setShowSettings(false)} />}
     </div>
   );
 }

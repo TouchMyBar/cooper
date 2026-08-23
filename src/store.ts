@@ -1,7 +1,30 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useCallback, useEffect, useState } from "react";
-import type { AppState } from "./types";
+import type { AppState, SoundPrefs } from "./types";
+
+// Open a secondary window from the frontend (routes by label in App.tsx). Using
+// the JS API + the origin root "/" reliably loads the app; a Rust-built runtime
+// window did not load the asset protocol on Windows.
+async function openLabeledWindow(label: string, title: string, w: number, h: number) {
+  const existing = await Promise.resolve(WebviewWindow.getByLabel(label)).catch(() => null);
+  if (existing) {
+    existing.setFocus();
+    return;
+  }
+  const win = new WebviewWindow(label, {
+    url: "/",
+    title,
+    width: w,
+    height: h,
+    minWidth: 480,
+    minHeight: 360,
+    center: true,
+    resizable: true,
+  });
+  win.once("tauri://error", (e) => console.error("window create error", e));
+}
 
 export const api = {
   getState: () => invoke<AppState>("get_state"),
@@ -26,7 +49,27 @@ export const api = {
   exportMarkdown: () => invoke<string>("export_markdown"),
   captureNow: () => invoke("capture_now"),
   hidePanel: () => invoke("hide_panel"),
-  openEditor: (id: number) => invoke("open_editor", { id }),
+  openEditor: (id: number) => openLabeledWindow(`editor-${id}`, "Edit — Cooper", 480, 380),
+  openDraw: () => openLabeledWindow("draw", "Draw — Cooper", 820, 600),
+  openUrl: (url: string) => invoke("open_url", { url }),
+  setUpdateCheckEnabled: (enabled: boolean) =>
+    invoke("set_update_check_enabled", { enabled }),
+  setUpdateLastCheck: (date: string) => invoke("set_update_last_check", { date }),
+  attachImage: (itemId: number, dataBase64: string, ext: string) =>
+    invoke<number>("attach_image", { itemId, dataBase64, ext }),
+  detachAttachment: (id: number) => invoke("detach_attachment", { id }),
+  addNoteToImage: (id: number) => invoke("add_note_to_image", { id }),
+  setExportDir: (path: string) => invoke("set_export_dir", { path }),
+  setKeybinds: (json: string) => invoke("set_keybinds", { json }),
+  getSoundPrefs: () => invoke<SoundPrefs>("get_sound_prefs"),
+  setSoundPref: (event: string, choice: string, custom?: string) =>
+    invoke("set_sound_pref", { event, choice, custom: custom ?? null }),
+  addChild: (parentId: number, content: string) =>
+    invoke<number>("add_child", { parentId, content }),
+  setBranchStyle: (id: number, style: string) =>
+    invoke("set_branch_style", { id, style }),
+  setItemCollapsed: (id: number, collapsed: boolean) =>
+    invoke("set_item_collapsed", { id, collapsed }),
 };
 
 // Image items store a stable file path; the data URL for a given path never
