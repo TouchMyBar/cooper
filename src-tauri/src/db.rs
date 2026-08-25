@@ -6,6 +6,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct Db(pub Mutex<Connection>);
 
+/// Sticky "sub-branch mode" parent: while set, captured/typed notes are inserted
+/// as branch children of this item instead of top-level. `None` = mode off.
+pub struct CaptureParent(pub Mutex<Option<i64>>);
+
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Section {
@@ -57,6 +61,8 @@ pub struct AppState {
     pub last_update_check: String,
     /// Custom export folder ("" = default Documents).
     pub export_dir: String,
+    /// Obsidian vault folder that "Save to Obsidian" writes .md files into ("" = unset).
+    pub obsidian_vault_dir: String,
     /// JSON map of action -> accelerator overrides ("{}" = all defaults).
     pub keybinds: String,
 }
@@ -228,6 +234,7 @@ pub fn get_state(conn: &Connection) -> rusqlite::Result<AppState> {
             .unwrap_or(true),
         last_update_check: get_setting(conn, "update_last_check").unwrap_or_default(),
         export_dir: get_setting(conn, "export_dir").unwrap_or_default(),
+        obsidian_vault_dir: get_setting(conn, "obsidian_vault_dir").unwrap_or_default(),
         keybinds: get_setting(conn, "keybinds").unwrap_or_else(|| "{}".into()),
     })
 }
@@ -253,6 +260,34 @@ pub fn insert_image_item(
         params![section_id, path, t],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+/// Insert a note as a branch child of `parent` when sub-branch mode is armed and
+/// `parent` is still a valid top-level item; otherwise insert it top-level in the
+/// active section. Returns the new item id. Shared by capture and typed-note paths.
+pub fn insert_note_maybe_child(
+    conn: &Connection,
+    text: &str,
+    parent: Option<i64>,
+) -> rusqlite::Result<i64> {
+    if let Some(pid) = parent {
+        // Only nest under a still-existing TOP-LEVEL item (branches are depth-1).
+        let section: Option<Option<i64>> = conn
+            .query_row(
+                "SELECT section_id FROM items WHERE id = ?1 AND parent_id IS NULL",
+                params![pid],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()?;
+        if let Some(section_id) = section {
+            let id = insert_child_item(conn, text, pid, section_id)?;
+            // Make sure the newly-added sub-point is visible.
+            conn.execute("UPDATE items SET collapsed = 0 WHERE id = ?1", params![pid])?;
+            return Ok(id);
+        }
+    }
+    let active = get_active_section(conn);
+    insert_item(conn, text, active)
 }
 
 /// Insert a branch child (sub-point) under `parent_id`, inheriting its section.

@@ -313,6 +313,15 @@ kbd {
   box-shadow: var(--shadow-card), 0 0 0 2px var(--accent);
 }
 
+/* The note that sub-branch mode is nesting captures under. */
+.card.sub-branch-parent {
+  box-shadow: var(--shadow-card), inset 3px 0 0 var(--accent);
+  background: var(--accent-soft);
+}
+.card.sub-branch-parent.selected {
+  box-shadow: var(--shadow-card), 0 0 0 2px var(--accent), inset 3px 0 0 var(--accent);
+}
+
 .card.done .card-content {
   color: var(--muted);
   text-decoration: line-through;
@@ -501,6 +510,13 @@ kbd {
   bottom: -16px;
   font-size: 10px;
   color: var(--accent);
+}
+.subbranch-hint {
+  left: 44px;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ============ context menu ============ */

@@ -21,11 +21,19 @@ pub fn get_state(db: State<db::Db>) -> CmdResult<db::AppState> {
 /// Add a note/prompt from the input. A line of the form "# Name" creates (or
 /// switches to) a section instead of adding an item.
 #[tauri::command]
-pub fn add_entry(app: AppHandle, db: State<db::Db>, content: String) -> CmdResult<()> {
+pub fn add_entry(
+    app: AppHandle,
+    db: State<db::Db>,
+    cap: State<db::CaptureParent>,
+    content: String,
+) -> CmdResult<()> {
     let text = content.trim();
     if text.is_empty() {
         return Ok(());
     }
+    // Snapshot the sub-branch-mode parent, then release its lock before locking
+    // the DB (the two mutexes are never held simultaneously).
+    let parent = { *cap.0.lock().map_err(err)? };
     let conn = db.0.lock().map_err(err)?;
     // "# Name" and "## Name" both create/switch to a section and expand ONLY that
     // section (the terminal-clear scroll is a UI concern; we never collapse others).
@@ -33,6 +41,7 @@ pub fn add_entry(app: AppHandle, db: State<db::Db>, content: String) -> CmdResul
         .strip_prefix("## ")
         .or_else(|| text.strip_prefix("# "));
     let mut added_item = false;
+    let mut made_section = false;
     if let Some(name) = section_prefix {
         let name = name.trim();
         if !name.is_empty() {
@@ -43,13 +52,18 @@ pub fn add_entry(app: AppHandle, db: State<db::Db>, content: String) -> CmdResul
             )
             .map_err(err)?;
             db::set_active_section(&conn, Some(id)).map_err(err)?;
+            made_section = true;
         }
     } else {
-        let active = db::get_active_section(&conn);
-        db::insert_item(&conn, text, active).map_err(err)?;
+        // While sub-branch mode is armed, typed notes nest under the sticky parent.
+        db::insert_note_maybe_child(&conn, text, parent).map_err(err)?;
         added_item = true;
     }
     drop(conn);
+    // Starting a section exits sub-branch mode.
+    if made_section {
+        *cap.0.lock().map_err(err)? = None;
+    }
     refresh(&app);
     if added_item {
         let _ = app.emit("note-added", ());
@@ -438,6 +452,233 @@ pub fn set_export_dir(db: State<db::Db>, path: String) -> CmdResult<()> {
     }
     let conn = db.0.lock().map_err(err)?;
     db::set_setting(&conn, "export_dir", p).map_err(err)
+}
+
+/// Arm/disarm sub-branch mode: while `parent` is set, captured and typed notes
+/// are inserted as children of that item instead of top-level. `None` = off.
+#[tauri::command]
+pub fn set_capture_parent(cap: State<db::CaptureParent>, parent: Option<i64>) -> CmdResult<()> {
+    *cap.0.lock().map_err(err)? = parent;
+    Ok(())
+}
+
+/// Set (or clear, with "") the Obsidian vault folder that "Save to Obsidian" uses.
+#[tauri::command]
+pub fn set_obsidian_vault_dir(db: State<db::Db>, path: String) -> CmdResult<()> {
+    let p = path.trim();
+    if !p.is_empty() && !std::path::Path::new(p).is_dir() {
+        return Err("That folder doesn't exist".into());
+    }
+    let conn = db.0.lock().map_err(err)?;
+    db::set_setting(&conn, "obsidian_vault_dir", p).map_err(err)
+}
+
+/// Strip a path down to its final component (file name).
+fn file_basename(path: &str) -> String {
+    path.replace('\\', "/")
+        .rsplit('/')
+        .next()
+        .unwrap_or(path)
+        .to_string()
+}
+
+/// Make an arbitrary string safe as a file name on Windows and macOS.
+fn sanitize_filename(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if (c as u32) < 0x20
+                || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+            {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    // Collapse whitespace; strip leading/trailing dots and spaces (Windows rejects them).
+    let mut s: String = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    s = s.trim_matches(|c| c == '.' || c == ' ').to_string();
+    if s.is_empty() {
+        s = "cooper-note".to_string();
+    }
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    // Windows blocks a reserved device name even with an extension (CON.log), so
+    // test the stem before the first dot.
+    let stem_reserved = {
+        let stem = s.split('.').next().unwrap_or(&s);
+        RESERVED.contains(&stem.to_ascii_uppercase().as_str())
+    };
+    if stem_reserved {
+        s = format!("_{s}");
+    }
+    if s.chars().count() > 120 {
+        s = s
+            .chars()
+            .take(120)
+            .collect::<String>()
+            .trim_end_matches(|c| c == '.' || c == ' ')
+            .to_string();
+    }
+    if s.is_empty() {
+        s = "cooper-note".to_string();
+    }
+    s
+}
+
+/// A YAML double-quoted scalar, safe for arbitrary text values. Control chars
+/// (incl. newlines) must become escape sequences or the frontmatter block fails
+/// to parse in Obsidian's YAML parser and every field is silently dropped.
+fn yaml_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// ISO date (UTC) from epoch milliseconds, via Hinnant's civil-from-days.
+fn iso_date(ms: i64) -> String {
+    let days = ms.div_euclid(86_400_000);
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+/// Collect an item id plus every descendant id (its whole branch).
+fn collect_subtree_ids(items: &[db::Item], root: i64, out: &mut Vec<i64>) {
+    out.push(root);
+    for c in items.iter().filter(|c| c.parent_id == Some(root)) {
+        collect_subtree_ids(items, c.id, out);
+    }
+}
+
+/// Render an item and its whole branch as an Obsidian task list (tab-indented,
+/// done -> "- [x]", undone -> "- [ ]"); image items and attachments embed via ![[…]].
+fn render_obsidian_tree(
+    items: &[db::Item],
+    attachments: &[db::Attachment],
+    item: &db::Item,
+    depth: usize,
+    out: &mut String,
+) {
+    let indent = "\t".repeat(depth);
+    if item.kind == "image" {
+        out.push_str(&format!("{indent}- ![[{}]]\n", file_basename(&item.content)));
+    } else {
+        let mark = if item.done { "x" } else { " " };
+        let cont_indent = "\t".repeat(depth + 1);
+        let content = item.content.replace('\n', &format!("\n{cont_indent}"));
+        out.push_str(&format!("{indent}- [{mark}] {content}\n"));
+    }
+    for a in attachments.iter().filter(|a| a.item_id == item.id) {
+        out.push_str(&format!("{indent}\t- ![[{}]]\n", file_basename(&a.path)));
+    }
+    for child in items.iter().filter(|c| c.parent_id == Some(item.id)) {
+        render_obsidian_tree(items, attachments, child, depth + 1, out);
+    }
+}
+
+/// Save one note (and its whole branch) as an Obsidian-friendly Markdown file in
+/// the configured vault. Title/filename = the note's section name; collisions get
+/// a numbered suffix. Images in the branch are copied into <vault>/attachments and
+/// embedded by name. Returns the written file path.
+#[tauri::command]
+pub fn export_note_obsidian(db: State<db::Db>, id: i64) -> CmdResult<String> {
+    let (state, vault) = {
+        let conn = db.0.lock().map_err(err)?;
+        let vault = db::get_setting(&conn, "obsidian_vault_dir").filter(|s| !s.is_empty());
+        (db::get_state(&conn).map_err(err)?, vault)
+    };
+    let vault = vault.ok_or("Set your Obsidian vault folder in Settings first")?;
+    let vault_dir = std::path::PathBuf::from(&vault);
+    if !vault_dir.is_dir() {
+        return Err("Your Obsidian vault folder no longer exists".into());
+    }
+
+    let root = state
+        .items
+        .iter()
+        .find(|i| i.id == id)
+        .ok_or("That note no longer exists")?;
+
+    let section_name = root
+        .section_id
+        .and_then(|sid| state.sections.iter().find(|s| s.id == sid))
+        .map(|s| s.name.clone())
+        .unwrap_or_else(|| "Inbox".to_string());
+
+    // Copy every image in the branch (image items + text attachments) into the
+    // vault's attachments folder, then embed by bare name.
+    let mut ids = Vec::new();
+    collect_subtree_ids(&state.items, id, &mut ids);
+    let idset: std::collections::HashSet<i64> = ids.iter().copied().collect();
+    let mut image_files: Vec<String> = state
+        .items
+        .iter()
+        .filter(|i| idset.contains(&i.id) && i.kind == "image")
+        .map(|i| i.content.clone())
+        .collect();
+    image_files.extend(
+        state
+            .attachments
+            .iter()
+            .filter(|a| idset.contains(&a.item_id))
+            .map(|a| a.path.clone()),
+    );
+    if !image_files.is_empty() {
+        let att_dir = vault_dir.join("attachments");
+        std::fs::create_dir_all(&att_dir).map_err(err)?;
+        for src in &image_files {
+            let dest = att_dir.join(file_basename(src));
+            if !dest.exists() {
+                let _ = std::fs::copy(src, &dest);
+            }
+        }
+    }
+
+    let mut md = String::new();
+    md.push_str("---\n");
+    md.push_str(&format!("title: {}\n", yaml_str(&section_name)));
+    md.push_str(&format!("created: {}\n", iso_date(root.created_at)));
+    md.push_str("source: Cooper\n");
+    md.push_str(&format!("section: {}\n", yaml_str(&section_name)));
+    md.push_str("tags:\n  - cooper\n");
+    md.push_str(&format!("cooper_id: {}\n", root.id));
+    md.push_str("---\n\n");
+    render_obsidian_tree(&state.items, &state.attachments, root, 0, &mut md);
+
+    // Filename = section name, de-duplicated with " 2", " 3", …
+    let base = sanitize_filename(&section_name);
+    let mut path = vault_dir.join(format!("{base}.md"));
+    let mut n = 2;
+    while path.exists() {
+        path = vault_dir.join(format!("{base} {n}.md"));
+        n += 1;
+    }
+    std::fs::write(&path, md).map_err(err)?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 /// Persist the JSON map of shortcut overrides.

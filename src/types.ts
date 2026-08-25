@@ -54,6 +54,7 @@ export interface AppState {
   updateCheckEnabled: boolean;
   lastUpdateCheck: string;
   exportDir: string;
+  obsidianVaultDir: string;
   keybinds: string;
 }
 

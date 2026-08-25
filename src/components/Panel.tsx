@@ -85,6 +85,9 @@ export default function Panel() {
   // (and a second Enter on the same note also marks it done).
   const [tabMode, setTabMode] = useState(false);
   const enterCopyRef = useRef<number | null>(null);
+  // Sub-branch mode: while set, captured/typed notes nest under this parent id.
+  const [subBranchParentId, setSubBranchParentId] = useState<number | null>(null);
+  const subBranchParentIdRef = useRef<number | null>(null);
   const updateCheckedRef = useRef(false);
   const setupPromptedRef = useRef(false);
 
@@ -115,6 +118,29 @@ export default function Panel() {
     });
   }, []);
 
+  // Sub-branch mode: arm makes future captures/typed notes nest under `id`;
+  // disarm returns to normal top-level capturing. The backend mirrors the parent
+  // (via set_capture_parent) so both the capture and typed-note paths honor it.
+  const armSubBranch = useCallback(
+    (id: number) => {
+      setSubBranchParentId(id);
+      api.setCaptureParent(id);
+      flashToast("Sub-branch mode · captures nest here · Esc to exit");
+    },
+    [flashToast],
+  );
+  const disarmSubBranch = useCallback(() => {
+    setSubBranchParentId((cur) => {
+      if (cur !== null) api.setCaptureParent(null);
+      return null;
+    });
+  }, []);
+
+  // Keep a ref in sync so the once-registered capture listener reads the live value.
+  useEffect(() => {
+    subBranchParentIdRef.current = subBranchParentId;
+  }, [subBranchParentId]);
+
   // Focus the quick-add input whenever the panel is summoned; brief toast + sound
   // on capture; sound on any new note.
   useEffect(() => {
@@ -122,7 +148,7 @@ export default function Panel() {
     const unlisteners: (() => void)[] = [];
     listen("panel-shown", () => focusComposer()).then((f) => unlisteners.push(f));
     listen("captured", () => {
-      flashToast("Captured");
+      flashToast(subBranchParentIdRef.current !== null ? "Added as sub-branch" : "Captured");
       play("capture");
     }).then((f) => unlisteners.push(f));
     listen("note-added", () => play("newNote")).then((f) => unlisteners.push(f));
@@ -351,6 +377,16 @@ export default function Panel() {
   }, [groups, childrenByParent]);
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items]);
   const binds = useMemo(() => resolveBinds(state?.keybinds), [state?.keybinds]);
+
+  // Any section switch/create exits sub-branch mode ("Ctrl+K to start the top again").
+  useEffect(() => {
+    disarmSubBranch();
+  }, [activeSectionId, disarmSubBranch]);
+
+  // Auto-disarm if the sticky parent was deleted out from under us.
+  useEffect(() => {
+    if (subBranchParentId !== null && !itemById.has(subBranchParentId)) disarmSubBranch();
+  }, [itemById, subBranchParentId, disarmSubBranch]);
   // Visual ids within the active section only — used for Tab cycling.
   const activeFlatIds = useMemo(
     () => flatIds.filter((id) => (itemById.get(id)?.sectionId ?? null) === activeSectionId),
@@ -447,6 +483,17 @@ export default function Panel() {
     setEditingId(newId);
   }, []);
 
+  // Save a note + its whole branch as an Obsidian-friendly .md in the vault.
+  const exportObsidian = useCallback(
+    (id: number) => {
+      api
+        .exportNoteObsidian(id)
+        .then(() => flashToast("Saved to Obsidian"))
+        .catch((e) => flashToast(typeof e === "string" ? e : "Obsidian save failed"));
+    },
+    [flashToast],
+  );
+
   const onItemClick = (e: React.MouseEvent, id: number) => {
     setTabMode(false);
     if (e.ctrlKey || e.metaKey) {
@@ -483,6 +530,7 @@ export default function Panel() {
 
       if (accel && accel === binds.switchSection) {
         e.preventDefault();
+        disarmSubBranch();
         setShowSwitcher((v) => !v);
         return;
       }
@@ -496,6 +544,13 @@ export default function Panel() {
           return; // overlays close themselves
         if (editingId !== null) return;
         if (inField && (target as HTMLTextAreaElement).value) return;
+        // First Esc exits sub-branch mode without hiding the panel; a second Esc
+        // (now disarmed, nothing selected) falls through to hide.
+        if (subBranchParentId !== null) {
+          disarmSubBranch();
+          setSelected([]);
+          return;
+        }
         if (selected.length) {
           setSelected([]);
           return;
@@ -507,7 +562,9 @@ export default function Panel() {
 
       if (e.key === "Tab") {
         // Cycle through the active section's notes, wrapping back to the composer.
+        // Tabbing also exits sub-branch mode ("we tab out").
         e.preventDefault();
+        disarmSubBranch();
         if (!activeFlatIds.length) {
           focusComposer();
           return;
@@ -581,7 +638,14 @@ export default function Panel() {
         const it = itemById.get(selected[0]);
         if (it && it.kind !== "image" && it.parentId === null) {
           e.preventDefault();
-          createChild(it.id);
+          // On the LAST top-level note of the active section, Ctrl+B arms
+          // sub-branch mode (captures/typed notes nest under it); elsewhere it
+          // keeps the classic "insert an empty sub-point and edit it" behavior.
+          const activeTop =
+            groups.find((g) => (g.section?.id ?? null) === activeSectionId)?.items ?? [];
+          const isLast = activeTop.length > 0 && activeTop[activeTop.length - 1].id === it.id;
+          if (isLast) armSubBranch(it.id);
+          else createChild(it.id);
         }
       }
     };
@@ -607,6 +671,11 @@ export default function Panel() {
     activeFlatIds,
     focusComposer,
     tabMode,
+    groups,
+    activeSectionId,
+    subBranchParentId,
+    armSubBranch,
+    disarmSubBranch,
   ]);
 
   const submitInput = async () => {
@@ -617,6 +686,10 @@ export default function Panel() {
     if (inputRef.current) inputRef.current.style.height = "auto";
     const isSection = text.startsWith("# ") || text.startsWith("## ");
     if (isSection) {
+      // The backend clears the sub-branch parent on every section command; mirror
+      // it here so re-declaring the ALREADY-active section (no activeSectionId
+      // change, so the disarm effect won't fire) still exits sub-branch mode.
+      disarmSubBranch();
       flashToast(`Section “${text.replace(/^#{1,2}\s*/, "")}”`);
       // the activeSectionId pin effect handles the scroll
     } else {
@@ -701,6 +774,14 @@ export default function Panel() {
           entries.push({ label: "Open Branch", onClick: () => setBranchPaneId(target!.id) });
         }
       }
+    }
+
+    if (single) {
+      entries.push({
+        label: "Save to Obsidian",
+        separatorBefore: true,
+        onClick: () => exportObsidian(ids[0]),
+      });
     }
 
     entries.push({
@@ -806,6 +887,7 @@ export default function Panel() {
           item={item}
           depth={depth}
           selected={selected.includes(item.id)}
+          armed={subBranchParentId === item.id}
           editing={editingId === item.id}
           attachments={attachmentsByItem.get(item.id)}
           hasChildren={hasKids}
@@ -1036,6 +1118,7 @@ export default function Panel() {
             } else if (e.key === "Tab") {
               // Tab from the composer jumps into the active section's notes.
               e.preventDefault();
+              disarmSubBranch();
               if (!activeFlatIds.length) return;
               const id = e.shiftKey ? activeFlatIds[activeFlatIds.length - 1] : activeFlatIds[0];
               setSelected([id]);
@@ -1054,6 +1137,13 @@ export default function Panel() {
             {input.startsWith("##")
               ? "clears the board — scroll up for the rest"
               : "creates a section"}
+          </span>
+        )}
+        {subBranchParentId !== null && !input.startsWith("#") && (
+          <span className="composer-hint subbranch-hint">
+            ↳ sub-branch mode · nesting under “
+            {(itemById.get(subBranchParentId)?.content || "note").replace(/\n/g, " ").slice(0, 28)}
+            ” · Esc to exit
           </span>
         )}
       </div>

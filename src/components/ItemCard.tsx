@@ -87,6 +87,8 @@ function AttachmentThumb({
 interface Props {
   item: Item;
   selected: boolean;
+  /** Sub-branch mode is armed on this note (captures nest under it). */
+  armed?: boolean;
   editing: boolean;
   depth?: number;
   attachments?: Attachment[];
@@ -110,6 +112,7 @@ interface Props {
 export default function ItemCard({
   item,
   selected,
+  armed = false,
   editing,
   depth = 0,
   attachments,
@@ -151,6 +154,7 @@ export default function ItemCard({
 
   const classes = ["card"];
   if (selected) classes.push("selected");
+  if (armed) classes.push("sub-branch-parent");
   if (item.done) classes.push("done");
   if (isImage) classes.push("card-image-item");
   if (depth > 0) classes.push("is-child");

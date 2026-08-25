@@ -188,10 +188,16 @@ pub fn capture_clipboard(app: &AppHandle) {
 }
 
 fn add_text_item(app: &AppHandle, text: &str) -> Result<(), String> {
+    // Snapshot the sub-branch-mode parent (if any) and release the lock before
+    // touching the DB, so the two mutexes are never held at once.
+    let parent = {
+        let cap = app.state::<db::CaptureParent>();
+        let guard = cap.0.lock().map_err(|e| e.to_string())?;
+        *guard
+    };
     let db = app.state::<db::Db>();
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    let active = db::get_active_section(&conn);
-    db::insert_item(&conn, text, active).map_err(|e| e.to_string())?;
+    db::insert_note_maybe_child(&conn, text, parent).map_err(|e| e.to_string())?;
     drop(conn);
     let _ = app.emit("refresh", ());
     let _ = app.emit("captured", ());

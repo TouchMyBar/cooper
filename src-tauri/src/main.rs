@@ -53,6 +53,9 @@ fn main() {
             commands::detach_attachment,
             commands::add_note_to_image,
             commands::set_export_dir,
+            commands::set_capture_parent,
+            commands::set_obsidian_vault_dir,
+            commands::export_note_obsidian,
             commands::set_keybinds,
             commands::get_sound_prefs,
             commands::set_sound_pref,
@@ -69,6 +72,7 @@ fn main() {
             let conn = db::init(&data_dir.join("cooper.db"))?;
             let glass_on = db::get_setting(&conn, "theme").as_deref() == Some("glass");
             app.manage(db::Db(Mutex::new(conn)));
+            app.manage(db::CaptureParent(Mutex::new(None)));
 
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);

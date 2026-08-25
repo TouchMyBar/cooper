@@ -19,6 +19,7 @@ export default function SettingsSheet({ onClose }: { onClose: () => void }) {
     null,
   );
   const [exportDir, setExportDir] = useState("");
+  const [vaultDir, setVaultDir] = useState("");
   const [showEditor, setShowEditor] = useState(false);
   const fileFor = useRef<"capture" | "newNote" | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -27,7 +28,10 @@ export default function SettingsSheet({ onClose }: { onClose: () => void }) {
     api.getSoundPrefs().then(setPrefs).catch(() => setPrefs(null));
     api
       .getState()
-      .then((s) => setExportDir(s.exportDir))
+      .then((s) => {
+        setExportDir(s.exportDir);
+        setVaultDir(s.obsidianVaultDir);
+      })
       .catch(() => {});
   }, []);
 
@@ -94,6 +98,19 @@ export default function SettingsSheet({ onClose }: { onClose: () => void }) {
       await api.setExportDir(sel);
       setExportDir(sel);
       setNote("Export folder updated.");
+    }
+  };
+
+  const browseObsidian = async () => {
+    const sel = await open({
+      directory: true,
+      defaultPath: vaultDir || undefined,
+      title: "Choose your Obsidian vault folder",
+    });
+    if (typeof sel === "string") {
+      await api.setObsidianVaultDir(sel);
+      setVaultDir(sel);
+      setNote("Obsidian vault folder set.");
     }
   };
 
@@ -179,6 +196,22 @@ export default function SettingsSheet({ onClose }: { onClose: () => void }) {
                 {exportDir || "Documents"}
               </span>
               <button className="settings-btn" onClick={browseExport}>
+                Browse…
+              </button>
+            </span>
+          </div>
+        </div>
+
+        {/* Obsidian — save notes as .md into a vault */}
+        <div className="settings-section-title">Obsidian</div>
+        <div className="settings-card">
+          <div className="settings-row">
+            <span className="settings-label">Vault folder</span>
+            <span className="settings-value">
+              <span className="settings-path" title={vaultDir || "Not set"}>
+                {vaultDir || "Not set"}
+              </span>
+              <button className="settings-btn" onClick={browseObsidian}>
                 Browse…
               </button>
             </span>
