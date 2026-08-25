@@ -130,7 +130,7 @@ fn do_capture(app: &AppHandle) -> Result<(), String> {
 
     // Let the user's shift release settle before injecting the copy chord.
     std::thread::sleep(Duration::from_millis(60));
-    send_copy()?;
+    send_copy(app)?;
 
     let mut captured = None;
     for _ in 0..14 {
@@ -188,7 +188,32 @@ fn add_text_item(app: &AppHandle, text: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn send_copy() -> Result<(), String> {
+/// Press the platform copy chord.
+///
+/// On macOS this must happen on the main thread. enigo builds a keyboard-layout
+/// mapping through HIToolbox's Text Services APIs, which assert they are on the
+/// main dispatch queue and abort the whole process with SIGILL when they aren't
+/// — the same main-thread rule that makes rdev unusable here. Capture runs on a
+/// worker thread, so hop across and wait for the result.
+fn send_copy(app: &AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.run_on_main_thread(move || {
+            let _ = tx.send(press_copy_chord());
+        })
+        .map_err(|e| e.to_string())?;
+        rx.recv_timeout(Duration::from_secs(3))
+            .map_err(|_| "timed out sending the copy chord".to_string())?
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        press_copy_chord()
+    }
+}
+
+fn press_copy_chord() -> Result<(), String> {
     use enigo::{Direction, Enigo, Key, Keyboard, Settings};
     let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
     #[cfg(target_os = "macos")]

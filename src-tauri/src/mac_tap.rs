@@ -64,8 +64,6 @@ const HEALTH_INTERVAL: Duration = Duration::from_secs(2);
 extern "C" {
     fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
     fn CGEventTapIsEnabled(tap: CFMachPortRef) -> bool;
-    fn CGPreflightListenEventAccess() -> bool;
-    fn CGPreflightPostEventAccess() -> bool;
 }
 
 // `AXIsProcessTrusted` returns a `Boolean`, which is `unsigned char` and not
@@ -92,12 +90,6 @@ pub fn is_trusted() -> bool {
     unsafe { AXIsProcessTrusted() != 0 }
 }
 
-/// Whether the tap is allowed to receive keys and Cooper is allowed to inject
-/// the copy chord. On macOS 12 a single Accessibility grant satisfies both;
-/// neither call prompts, so this is safe to poll.
-fn has_permission() -> bool {
-    unsafe { CGPreflightListenEventAccess() && CGPreflightPostEventAccess() }
-}
 
 struct State {
     prev_flags: u64,
@@ -181,10 +173,13 @@ fn on_flags_changed(state: &RefCell<State>, flags: u64, now: Instant) -> Action 
 /// to be re-enabled. Only `CGEventTapIsEnabled` distinguishes a live tap from
 /// that corpse, so it is checked after arming and then periodically, which also
 /// catches the permission being revoked while Cooper runs.
+///
+/// Note what is deliberately *not* here: a `CGPreflightListenEventAccess` gate.
+/// Ticking Accessibility does not create an Input Monitoring row, so that
+/// preflight reports false for an app that can nonetheless tap perfectly well.
+/// Gating on it strands a correctly-permitted Cooper in "needs setup" forever.
+/// Building the tap and asking whether it armed is the only trustworthy test.
 fn run_tap(app: &AppHandle) -> Result<(), &'static str> {
-    if !has_permission() {
-        return Err("Accessibility not granted");
-    }
     let state = RefCell::new(State {
         prev_flags: 0,
         pressed: None,
@@ -239,7 +234,11 @@ fn run_tap(app: &AppHandle) -> Result<(), &'static str> {
     tap.enable();
 
     if !unsafe { CGEventTapIsEnabled(port_ref) } {
-        return Err("the event tap was created but refused to arm");
+        return Err(if is_trusted() {
+            "the event tap would not arm despite Accessibility being granted"
+        } else {
+            "Accessibility not granted"
+        });
     }
 
     TAP_RUNNING.store(true, Ordering::Relaxed);
