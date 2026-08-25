@@ -5,6 +5,8 @@ mod commands;
 mod db;
 mod glass;
 #[cfg(target_os = "macos")]
+mod mac_setup;
+#[cfg(target_os = "macos")]
 mod mac_tap;
 mod panel;
 mod tray;
@@ -57,6 +59,9 @@ fn main() {
             commands::add_child,
             commands::set_branch_style,
             commands::set_item_collapsed,
+            commands::mac_setup_state,
+            commands::mac_open_accessibility,
+            commands::mac_remove_quarantine,
         ])
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;

@@ -44,9 +44,13 @@ First-run notes:
 
 - **Windows**: SmartScreen may warn because the binary is unsigned — click
   *More info → Run anyway*.
-- **macOS**: unsigned app; right-click → *Open* the first time (or
-  `xattr -dr com.apple.quarantine /Applications/Cooper.app`). Grant
-  **Accessibility** permission for the double-shift capture.
+- **macOS**: **drag Cooper out of the disk image into Applications and eject the
+  image before opening it.** Run from the mounted image, macOS keeps relaunching
+  a throwaway read-only copy, and no permission you grant can ever stick.
+  Then right-click → *Open* the first time (or
+  `xattr -dr com.apple.quarantine /Applications/Cooper.app`), and grant
+  **Accessibility** for the double-shift shortcuts. Cooper detects each of these
+  states and walks you through whichever one applies.
 - **Linux**: the AppImage needs no install. On Wayland use the fallback
   hotkeys (see below).
 
@@ -118,9 +122,16 @@ One Tauri 2 codebase (Rust core + web UI in the OS webview) compiles to a
 
 ## Platform notes
 
-- **macOS** — the double-shift capture uses a low-level event tap, which
-  requires the Accessibility permission. Without it, the fallback hotkeys
-  still work.
+- **macOS** — the double-shift shortcuts use a low-level event tap, which needs
+  the Accessibility permission (one checkbox: it covers both watching for the
+  Shift taps and sending the copy chord). Without it the fallback hotkeys still
+  work. Ticking the box takes effect immediately — no relaunch. Cooper shows a
+  short setup guide whenever it detects the shortcuts are inert.
+  Because the released builds are unsigned, macOS treats **every Cooper update
+  as a different app** and silently drops the permission while leaving the
+  checkbox visibly ticked. If double-shift stops after an update, remove Cooper
+  from the Accessibility list with **−** and add it back. Cooper notices this
+  and reopens the guide by itself.
 - **Linux** — the raw keyboard hook works on X11; on Wayland use the fallback
   hotkeys.
 - **Capture mechanics** — capturing simulates the platform copy chord and

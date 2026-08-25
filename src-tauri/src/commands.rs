@@ -711,3 +711,56 @@ pub fn set_item_collapsed(app: AppHandle, db: State<db::Db>, id: i64, collapsed:
     refresh(&app);
     Ok(())
 }
+
+/// Why the macOS double-shift listener isn't running yet, so the UI can show
+/// the single step that applies. Every field is inert off macOS.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MacSetup {
+    pub applicable: bool,
+    pub tap_running: bool,
+    pub trusted: bool,
+    pub translocated: bool,
+    pub real_path: String,
+    pub on_read_only_volume: bool,
+    pub will_translocate: bool,
+}
+
+#[tauri::command]
+pub fn mac_setup_state() -> MacSetup {
+    #[cfg(target_os = "macos")]
+    {
+        crate::mac_setup::state()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        MacSetup {
+            applicable: false,
+            tap_running: true,
+            trusted: true,
+            translocated: false,
+            real_path: String::new(),
+            on_read_only_volume: false,
+            will_translocate: false,
+        }
+    }
+}
+
+#[tauri::command]
+pub fn mac_open_accessibility() {
+    #[cfg(target_os = "macos")]
+    crate::mac_setup::open_accessibility_settings();
+}
+
+#[tauri::command]
+pub fn mac_remove_quarantine(path: String) -> CmdResult<()> {
+    #[cfg(target_os = "macos")]
+    {
+        return crate::mac_setup::remove_quarantine(&path).map_err(|e| e);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}

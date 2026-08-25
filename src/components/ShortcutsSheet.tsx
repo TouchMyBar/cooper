@@ -28,7 +28,15 @@ const GROUPS: { title: string; rows: [string, string[]][] }[] = [
   },
 ];
 
-export default function ShortcutsSheet({ onClose }: { onClose: () => void }) {
+export default function ShortcutsSheet({
+  onClose,
+  needsSetup,
+  onSetup,
+}: {
+  onClose: () => void;
+  needsSetup?: boolean;
+  onSetup?: () => void;
+}) {
   return (
     <div className="overlay" onMouseDown={onClose}>
       <div className="sheet" onMouseDown={(e) => e.stopPropagation()}>
@@ -48,6 +56,11 @@ export default function ShortcutsSheet({ onClose }: { onClose: () => void }) {
             ))}
           </div>
         ))}
+        {needsSetup && (
+          <button className="setup-nudge" onClick={onSetup}>
+            The two Shift shortcuts need a one-time setup on macOS — set it up
+          </button>
+        )}
       </div>
     </div>
   );

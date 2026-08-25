@@ -36,6 +36,7 @@ rdev = "0.5"
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.25"
 core-foundation = "0.10"
+libc = "0.2"
 
 [profile.release]
 panic = "abort"

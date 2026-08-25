@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useCallback, useEffect, useState } from "react";
-import type { AppState, SoundPrefs } from "./types";
+import type { AppState, MacSetup, SoundPrefs } from "./types";
 
 // Open a secondary window from the frontend (routes by label in App.tsx). Using
 // the JS API + the origin root "/" reliably loads the app; a Rust-built runtime
@@ -28,6 +28,9 @@ async function openLabeledWindow(label: string, title: string, w: number, h: num
 
 export const api = {
   getState: () => invoke<AppState>("get_state"),
+  macSetupState: () => invoke<MacSetup>("mac_setup_state"),
+  macOpenAccessibility: () => invoke("mac_open_accessibility"),
+  macRemoveQuarantine: (path: string) => invoke("mac_remove_quarantine", { path }),
   addEntry: (content: string) => invoke("add_entry", { content }),
   toggleDone: (id: number) => invoke("toggle_done", { id }),
   updateItem: (id: number, content: string) => invoke("update_item", { id, content }),
@@ -122,4 +125,29 @@ export function useAppState() {
   }, [state?.theme]);
 
   return { state, refresh };
+}
+
+// Poll the macOS setup state so the guide reacts the instant the user ticks the
+// Accessibility box — macOS grants that live, with no relaunch. Polls slowly
+// once everything works, which also catches a permission being revoked later.
+export function useMacSetup() {
+  const [setup, setSetup] = useState<MacSetup | null>(null);
+  const healthy = !setup || !setup.applicable || setup.tapRunning;
+
+  useEffect(() => {
+    let alive = true;
+    const tick = () =>
+      api
+        .macSetupState()
+        .then((s) => alive && setSetup(s))
+        .catch(() => {});
+    tick();
+    const id = setInterval(tick, healthy ? 15000 : 2000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [healthy]);
+
+  return setup;
 }

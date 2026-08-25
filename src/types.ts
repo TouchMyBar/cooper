@@ -56,3 +56,13 @@ export interface AppState {
   exportDir: string;
   keybinds: string;
 }
+
+export interface MacSetup {
+  applicable: boolean;
+  tapRunning: boolean;
+  trusted: boolean;
+  translocated: boolean;
+  realPath: string;
+  onReadOnlyVolume: boolean;
+  willTranslocate: boolean;
+}

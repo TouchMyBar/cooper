@@ -1309,3 +1309,65 @@ input.branch-child-text {
   border-radius: 6px;
   cursor: pointer;
 }
+
+/* ============ macOS double-shift setup guide ============ */
+.setup-line {
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0 0 6px;
+  user-select: text;
+}
+
+.setup-muted {
+  color: var(--muted);
+}
+
+.setup-path {
+  font-size: 11px;
+  color: var(--muted);
+  word-break: break-all;
+  user-select: text;
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--faint);
+}
+
+.setup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0 4px;
+}
+
+.setup-actions button {
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 0.5px solid var(--hairline);
+  background: var(--card-hover);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.setup-actions button:first-child {
+  background: var(--accent);
+  border-color: transparent;
+  color: #fff;
+}
+
+/* Sits under the empty-state shortcut rows, which keep advertising
+   double-shift; this only says it needs switching on first. */
+.setup-nudge {
+  margin-top: 10px;
+  width: 100%;
+  font-size: 11px;
+  line-height: 1.4;
+  text-align: left;
+  padding: 7px 9px;
+  border-radius: 9px;
+  border: 0.5px solid var(--hairline);
+  background: var(--accent-soft);
+  color: var(--text);
+  cursor: pointer;
+}

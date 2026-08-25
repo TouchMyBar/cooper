@@ -101,18 +101,40 @@ only for the toolbar.
 
 ## Global capture: platform reality
 
-Left-Shift×2 (capture) and Right-Shift×2 (toggle) live entirely in Rust
-(`capture.rs:27-86`) on an `rdev` listener thread, and are **compiled out on macOS**:
-`rdev` is declared under `[target.'cfg(not(target_os = "macos"))'.dependencies]` and the
-listener is started under the same `cfg` (`main.rs:73-74`), because rdev's macOS event tap
-crashes (SIGTRAP in HIToolbox). On macOS only the fallback global shortcuts
-`CmdOrCtrl+Shift+Space` / `CmdOrCtrl+Shift+C` exist. **The README, `ShortcutsSheet`,
-`ShortcutsEditor`, and the Panel empty state all advertise double-shift unconditionally on
-every platform** — that copy is wrong on macOS.
+Left-Shift×2 (capture) and Right-Shift×2 (toggle) live entirely in Rust. There are **two
+implementations behind a `cfg`**, and they share `TAP_WINDOW`, `HOLD_LIMIT`, and `Side`
+from `capture.rs`:
 
-Capture itself simulates the platform copy chord via `enigo` and reads the clipboard,
-using a zero-width sentinel to tell "nothing selected" from "same text re-copied". On
-macOS `enigo`'s synthetic events require the **Accessibility** permission, so the fallback
-capture hotkey silently captures nothing without it. Unsigned builds run under Gatekeeper
-**App Translocation** from a randomized path, which prevents Accessibility grants from
-persisting; `xattr -dr com.apple.quarantine /Applications/Cooper.app` is required first.
+- Non-macOS: `capture.rs`, on an `rdev` listener thread.
+- macOS: `mac_tap.rs`, a listen-only `CGEventTap`. rdev is *not* a macOS dependency — its
+  listener dies with SIGTRAP in HIToolbox because it decodes characters off the main
+  thread via the keyboard-layout APIs. The tap only reads modifier bits, never decodes.
+
+Non-obvious things that are load-bearing in `mac_tap.rs`:
+
+1. **Sides come from device-dependent flag bits** (`0x2` left, `0x4` right); the
+   device-independent Shift bit can't tell them apart.
+2. **`COMPANION_BITS` must be masked out** of the "another modifier moved" check. A live
+   tap reports `0x20020002` for Left Shift, not `0x2` — macOS also sets the
+   device-independent Shift bit and NonCoalesced. Without the mask every tap reads as a
+   chord and nothing ever fires. Tests use flag words captured from a real tap.
+3. **A created tap is not a working tap.** With `ListenOnly`, an unauthorised
+   `CGEventTapCreate` returns a non-null port with `KeyDown` stripped, permanently
+   disabled; `CGEventTapEnable` won't revive it. Viability is judged by
+   `CGEventTapIsEnabled`, rechecked on a timer so a revoked grant is noticed.
+
+`mac_setup.rs` diagnoses *why* it isn't working, via `statfs` (translocation, the real
+bundle path, read-only volume) plus the quarantine xattr. `commands::mac_setup_state`
+exposes that; `MacSetupSheet.tsx` renders one instruction at a time. **Order matters:
+relocation before permission** — a grant to a translocated copy can never persist.
+
+The UI keeps advertising double-shift on every platform (Panel empty state,
+`ShortcutsSheet`, `ShortcutsEditor`, tray tooltip); when the tap is inert it *adds* a
+setup affordance rather than removing the copy.
+
+Capture itself simulates the copy chord via `enigo` and reads the clipboard, using a
+zero-width sentinel to tell "nothing selected" from "same text re-copied". On macOS one
+Accessibility grant covers both the tap and `enigo`'s injection. Because releases are
+unsigned, TCC stores a bare cdhash, so **every rebuild invalidates the grant** while the
+checkbox still looks ticked. Signing with a stable self-signed certificate would fix that;
+ad-hoc signing would not.

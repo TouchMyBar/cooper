@@ -6,13 +6,16 @@
 //! two Shift keys apart needs only the modifier flag bits, so this tap never
 //! touches those APIs and never decodes anything.
 //!
-//! The tap needs the Accessibility permission. Without it `CGEventTapCreate`
-//! returns NULL; we keep retrying so that granting it while Cooper is running
-//! starts the listener without a relaunch, and `is_running()` lets the UI show
-//! setup help until it does.
+//! The tap needs the Accessibility permission, which on macOS 12 covers both
+//! receiving keys and injecting the copy chord — one checkbox, no relaunch. An
+//! unauthorised tap does *not* fail loudly, so viability is judged by
+//! `CGEventTapIsEnabled` rather than by getting a handle back; see `run_tap`.
+//! We keep retrying, so ticking the box while Cooper is running starts the
+//! listener, and `is_running()` lets the UI show setup help until it does.
 
 use std::cell::RefCell;
 use std::ffi::c_void;
+use std::os::raw::c_uchar;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::Arc;
@@ -20,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use core_foundation::base::TCFType;
 use core_foundation::mach_port::CFMachPortRef;
-use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
+use core_foundation::runloop::{kCFRunLoopCommonModes, kCFRunLoopDefaultMode, CFRunLoop};
 use core_graphics::event::{
     CGEvent, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
     CGEventTapProxy, CGEventType, CallbackResult,
@@ -53,9 +56,23 @@ const COMPANION_BITS: u64 = SHIFT_BITS | NX_SHIFTMASK | NX_NONCOALESCEDMASK;
 /// How long to wait before re-attempting a tap that was refused for lack of
 /// permission.
 const RETRY_DELAY: Duration = Duration::from_secs(3);
+/// How often a live tap is checked for having been switched off underneath us.
+const HEALTH_INTERVAL: Duration = Duration::from_secs(2);
 
+// `CGEvent.h` declares these as C `bool`, so Rust `bool` is ABI-correct here.
+#[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
+    fn CGEventTapIsEnabled(tap: CFMachPortRef) -> bool;
+    fn CGPreflightListenEventAccess() -> bool;
+    fn CGPreflightPostEventAccess() -> bool;
+}
+
+// `AXIsProcessTrusted` returns a `Boolean`, which is `unsigned char` and not
+// C's `_Bool`, so it must not be declared as Rust `bool`.
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    fn AXIsProcessTrusted() -> c_uchar;
 }
 
 static TAP_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -64,6 +81,22 @@ static TAP_RUNNING: AtomicBool = AtomicBool::new(false);
 /// inert and the user needs to grant Accessibility.
 pub fn is_running() -> bool {
     TAP_RUNNING.load(Ordering::Relaxed)
+}
+
+/// Whether Cooper holds the Accessibility permission.
+///
+/// Calling this also has a useful side effect: it makes macOS create Cooper's
+/// row in the Accessibility list, so the user can simply tick a checkbox
+/// instead of hunting for the app with the "+" button.
+pub fn is_trusted() -> bool {
+    unsafe { AXIsProcessTrusted() != 0 }
+}
+
+/// Whether the tap is allowed to receive keys and Cooper is allowed to inject
+/// the copy chord. On macOS 12 a single Accessibility grant satisfies both;
+/// neither call prompts, so this is safe to poll.
+fn has_permission() -> bool {
+    unsafe { CGPreflightListenEventAccess() && CGPreflightPostEventAccess() }
 }
 
 struct State {
@@ -140,9 +173,18 @@ fn on_flags_changed(state: &RefCell<State>, flags: u64, now: Instant) -> Action 
     action
 }
 
-/// Run a tap on this thread until its run loop stops. Returns `Err` if the tap
-/// couldn't be created, which in practice means Accessibility was refused.
-fn run_tap(app: &AppHandle) -> Result<(), ()> {
+/// Run a tap on this thread until it stops being viable, then return why.
+///
+/// A tap must never be trusted just because it was created. With `ListenOnly`,
+/// an unauthorised `CGEventTapCreate` still hands back a non-null port with the
+/// KeyDown bit quietly stripped from its mask, permanently disabled and unable
+/// to be re-enabled. Only `CGEventTapIsEnabled` distinguishes a live tap from
+/// that corpse, so it is checked after arming and then periodically, which also
+/// catches the permission being revoked while Cooper runs.
+fn run_tap(app: &AppHandle) -> Result<(), &'static str> {
+    if !has_permission() {
+        return Err("Accessibility not granted");
+    }
     let state = RefCell::new(State {
         prev_flags: 0,
         pressed: None,
@@ -184,20 +226,30 @@ fn run_tap(app: &AppHandle) -> Result<(), ()> {
             }
             CallbackResult::Keep
         },
-    )?;
+    )
+    .map_err(|()| "could not create the event tap")?;
 
-    port.store(
-        tap.mach_port().as_concrete_TypeRef() as *mut c_void,
-        Ordering::Relaxed,
-    );
-    let source = tap.mach_port().create_runloop_source(0)?;
+    let port_ref = tap.mach_port().as_concrete_TypeRef();
+    port.store(port_ref as *mut c_void, Ordering::Relaxed);
+    let source = tap
+        .mach_port()
+        .create_runloop_source(0)
+        .map_err(|()| "could not attach the tap to a run loop")?;
     CFRunLoop::get_current().add_source(&source, unsafe { kCFRunLoopCommonModes });
     tap.enable();
 
+    if !unsafe { CGEventTapIsEnabled(port_ref) } {
+        return Err("the event tap was created but refused to arm");
+    }
+
     TAP_RUNNING.store(true, Ordering::Relaxed);
-    CFRunLoop::run_current();
+    // Run in slices rather than blocking forever, so a revoked permission is
+    // noticed and the outer loop can build a fresh tap.
+    while unsafe { CGEventTapIsEnabled(port_ref) } {
+        CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, HEALTH_INTERVAL, false);
+    }
     TAP_RUNNING.store(false, Ordering::Relaxed);
-    Ok(())
+    Err("the event tap was switched off")
 }
 
 #[cfg(test)]
@@ -373,15 +425,22 @@ mod tests {
 /// Start the listener on its own thread. Never fails loudly: if the permission
 /// is missing we keep retrying, and the fallback hotkeys work regardless.
 pub fn start(app: AppHandle) {
+    // Asking once, even though the answer is ignored here, is what makes macOS
+    // list Cooper under Accessibility — so the setup guide can say "tick the
+    // box" rather than "find the app with the + button".
+    let _ = is_trusted();
     std::thread::spawn(move || {
-        let mut warned = false;
+        let mut reported: Option<&'static str> = None;
         loop {
-            if run_tap(&app).is_err() && !warned {
-                warned = true;
-                eprintln!(
-                    "cooper: event tap refused — grant Accessibility to enable double-shift; \
-                     fallback hotkeys still active"
-                );
+            if let Err(reason) = run_tap(&app) {
+                // Only speak up when the reason changes, or a denied tap would
+                // print every few seconds forever.
+                if reported != Some(reason) {
+                    reported = Some(reason);
+                    eprintln!(
+                        "cooper: double-shift inactive — {reason}; fallback hotkeys still work"
+                    );
+                }
             }
             std::thread::sleep(RETRY_DELAY);
         }

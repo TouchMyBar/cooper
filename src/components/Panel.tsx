@@ -1,10 +1,11 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { api, useAppState } from "../store";
+import { api, useAppState, useMacSetup } from "../store";
 import type { Attachment, Item, Section } from "../types";
 import BranchPanel from "./BranchPanel";
 import ContextMenu, { MenuEntry } from "./ContextMenu";
 import ItemCard from "./ItemCard";
+import MacSetupSheet from "./MacSetupSheet";
 import SectionSwitcher from "./SectionSwitcher";
 import ShortcutsSheet from "./ShortcutsSheet";
 import SettingsSheet from "./SettingsSheet";
@@ -57,6 +58,9 @@ interface Group {
 
 export default function Panel() {
   const { state, refresh } = useAppState();
+  const macSetup = useMacSetup();
+  // Only meaningful on macOS, where the double-shift listener needs a permission.
+  const needsSetup = !!macSetup && macSetup.applicable && !macSetup.tapRunning;
   const [query, setQuery] = useState("");
   const [input, setInput] = useState("");
   const [selected, setSelected] = useState<number[]>([]);
@@ -73,6 +77,7 @@ export default function Panel() {
   const [dropCount, setDropCount] = useState<number | null>(null);
   const [update, setUpdate] = useState<{ tag: string; url: string } | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showMacSetup, setShowMacSetup] = useState(false);
   const [branchPaneId, setBranchPaneId] = useState<number | null>(null);
   const [composerMenu, setComposerMenu] = useState<{ x: number; y: number } | null>(null);
   const [spacerHeight, setSpacerHeight] = useState(0);
@@ -81,6 +86,7 @@ export default function Panel() {
   const [tabMode, setTabMode] = useState(false);
   const enterCopyRef = useRef<number | null>(null);
   const updateCheckedRef = useRef(false);
+  const setupPromptedRef = useRef(false);
 
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -129,6 +135,14 @@ export default function Panel() {
   }, [focusComposer]);
 
   // Once per launch, run the daily update check (the date gate lives in the DB).
+  // Surface the guide by itself the first time we notice double-shift is inert;
+  // the shortcut is advertised as working, so silence would just look broken.
+  useEffect(() => {
+    if (!needsSetup || setupPromptedRef.current) return;
+    setupPromptedRef.current = true;
+    setShowMacSetup(true);
+  }, [needsSetup]);
+
   useEffect(() => {
     if (!state || updateCheckedRef.current) return;
     updateCheckedRef.current = true;
@@ -478,7 +492,7 @@ export default function Panel() {
         return;
       }
       if (e.key === "Escape") {
-        if (showHelp || showSettings || showSwitcher || itemMenu || sectionMenu || appMenu)
+        if (showHelp || showSettings || showMacSetup || showSwitcher || itemMenu || sectionMenu || appMenu)
           return; // overlays close themselves
         if (editingId !== null) return;
         if (inField && (target as HTMLTextAreaElement).value) return;
@@ -581,6 +595,7 @@ export default function Panel() {
     showSwitcher,
     showHelp,
     showSettings,
+    showMacSetup,
     itemMenu,
     sectionMenu,
     appMenu,
@@ -731,6 +746,14 @@ export default function Panel() {
     return [
       { label: "New section…", kbd: `${MOD} K`, onClick: () => setShowSwitcher(true) },
       { label: "Capture selection", onClick: () => api.captureNow() },
+      ...(macSetup?.applicable
+        ? [
+            {
+              label: needsSetup ? "Set up double-shift…" : "Double-shift setup…",
+              onClick: () => setShowMacSetup(true),
+            },
+          ]
+        : []),
       {
         label: `Theme: ${theme[0].toUpperCase()}${theme.slice(1)}`,
         separatorBefore: true,
@@ -865,6 +888,11 @@ export default function Panel() {
                   <kbd>Right Shift</kbd> <kbd>Right Shift</kbd>
                 </span>
               </div>
+              {needsSetup && (
+                <button className="setup-nudge" onClick={() => setShowMacSetup(true)}>
+                  Double-shift needs a one-time setup on macOS — set it up
+                </button>
+              )}
               <div className="empty-row">
                 <span>See all shortcuts</span>
                 <span>
@@ -1100,8 +1128,20 @@ export default function Panel() {
           onClose={() => setShowSwitcher(false)}
         />
       )}
-      {showHelp && <ShortcutsSheet onClose={() => setShowHelp(false)} />}
+      {showHelp && (
+        <ShortcutsSheet
+          onClose={() => setShowHelp(false)}
+          needsSetup={needsSetup}
+          onSetup={() => {
+            setShowHelp(false);
+            setShowMacSetup(true);
+          }}
+        />
+      )}
       {showSettings && <SettingsSheet onClose={() => setShowSettings(false)} />}
+      {showMacSetup && macSetup && (
+        <MacSetupSheet setup={macSetup} onClose={() => setShowMacSetup(false)} />
+      )}
     </div>
   );
 }
