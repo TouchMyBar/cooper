@@ -42,6 +42,15 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
             librsvg2-dev patchelf libx11-dev libxi-dev libxtst-dev libxdo-dev
 
+      - name: Strip build paths from binaries
+        shell: bash
+        run: |
+          # Rust bakes dependency source paths into panic messages, and
+          # `strip` does not remove them, so a binary would otherwise ship the
+          # builder's home directory. Expanded here by the shell so no absolute
+          # path is ever committed. (Cargo's own `trim-paths` is still nightly.)
+          echo "RUSTFLAGS=--remap-path-prefix=$HOME=/build --remap-path-prefix=$PWD=/src" >> "$GITHUB_ENV"
+
       - name: Install frontend dependencies
         run: npm install
 

@@ -117,6 +117,18 @@ npm run tauri dev      # run in development
 npm run tauri build    # produce installers/bundles for your OS
 ```
 
+If you plan to **publish** a binary you built yourself, strip your own paths out
+of it first. Rust bakes dependency source paths into panic messages, and
+`strip` does not remove them, so an ordinary build embeds your home directory
+several hundred times over:
+
+```sh
+RUSTFLAGS="--remap-path-prefix=$HOME=/build" npm run tauri build
+```
+
+CI already does this. (Cargo's own `trim-paths` would be tidier, but it is still
+nightly-only.)
+
 One Tauri 2 codebase (Rust core + web UI in the OS webview) compiles to a
 ~10 MB native binary on every platform. No Electron.
 

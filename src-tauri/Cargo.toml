@@ -39,9 +39,6 @@ core-foundation = "0.10"
 libc = "0.2"
 
 [profile.release]
-# Strip absolute build paths out of panic messages and debug info, so a
-# locally-built binary does not ship the builder's home directory.
-trim-paths = "all"
 panic = "abort"
 lto = "thin"
 opt-level = "s"
