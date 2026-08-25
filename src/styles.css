@@ -1138,9 +1138,11 @@ kbd {
   color: var(--text);
 }
 .branch-children {
-  margin: 2px 0 2px 26px;
+  /* Compact per-level indent (~16px) + the left rule so nesting stays legible
+     without running out of width at the 10-level cap in a 380px panel. */
+  margin: 2px 0 2px 12px;
   border-left: 1.5px solid var(--hairline);
-  padding-left: 6px;
+  padding-left: 4px;
 }
 .card.is-child {
   margin: 4px 0;

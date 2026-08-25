@@ -55,6 +55,7 @@ fn main() {
             commands::set_export_dir,
             commands::set_capture_parent,
             commands::set_obsidian_vault_dir,
+            commands::detect_obsidian_vault,
             commands::export_note_obsidian,
             commands::set_keybinds,
             commands::get_sound_prefs,

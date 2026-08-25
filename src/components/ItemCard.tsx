@@ -149,7 +149,9 @@ export default function ItemCard({
   }, [editing, item.content]);
 
   const isImage = item.kind === "image";
-  const inlineTri = depth === 0 && hasChildren && branchStyle === "inline";
+  // Inline collapse triangle at any depth (levels below the top are always
+  // inline); the side-panel badge stays a top-level-only affordance.
+  const inlineTri = hasChildren && (depth > 0 || branchStyle === "inline");
   const panelBadge = depth === 0 && hasChildren && branchStyle === "panel";
 
   const classes = ["card"];

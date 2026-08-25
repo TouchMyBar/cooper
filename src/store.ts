@@ -64,6 +64,7 @@ export const api = {
   addNoteToImage: (id: number) => invoke("add_note_to_image", { id }),
   setExportDir: (path: string) => invoke("set_export_dir", { path }),
   setObsidianVaultDir: (path: string) => invoke("set_obsidian_vault_dir", { path }),
+  detectObsidianVault: () => invoke<string | null>("detect_obsidian_vault"),
   exportNoteObsidian: (id: number) => invoke<string>("export_note_obsidian", { id }),
   setCaptureParent: (parent: number | null) => invoke("set_capture_parent", { parent }),
   setKeybinds: (json: string) => invoke("set_keybinds", { json }),

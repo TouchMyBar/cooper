@@ -600,18 +600,80 @@ fn render_obsidian_tree(
     }
 }
 
+/// Obsidian's own config file (it lists the user's vaults), per platform:
+/// %APPDATA%\obsidian\obsidian.json / ~/Library/Application Support/obsidian/… /
+/// ~/.config/obsidian/… — resolved via the platform config dir.
+fn obsidian_config_file(app: &AppHandle) -> Option<std::path::PathBuf> {
+    let p = app.path().config_dir().ok()?.join("obsidian").join("obsidian.json");
+    p.exists().then_some(p)
+}
+
+/// Vault folders Obsidian knows about, best-first: the currently-open vault(s)
+/// first, then by most-recently-opened. Empty if Obsidian isn't set up.
+fn obsidian_vaults(app: &AppHandle) -> Vec<String> {
+    let Some(cfg) = obsidian_config_file(app) else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&cfg) else {
+        return Vec::new();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(vaults) = json.get("vaults").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+    let mut list: Vec<(String, bool, i64)> = vaults
+        .values()
+        .filter_map(|v| {
+            let path = v.get("path")?.as_str()?.to_string();
+            let open = v.get("open").and_then(|o| o.as_bool()).unwrap_or(false);
+            let ts = v.get("ts").and_then(|t| t.as_i64()).unwrap_or(0);
+            Some((path, open, ts))
+        })
+        .collect();
+    // Open vault(s) first, then most-recently-opened.
+    list.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
+    list.into_iter().map(|(p, _, _)| p).collect()
+}
+
+/// Resolve the vault to write into, freshly each call so it tracks the current
+/// setup: the user's explicit override if set and still present, otherwise
+/// Obsidian's currently-open / most-recent vault. `None` if none exists.
+fn resolve_obsidian_vault(conn: &rusqlite::Connection, app: &AppHandle) -> Option<String> {
+    if let Some(dir) = db::get_setting(conn, "obsidian_vault_dir").filter(|s| !s.is_empty()) {
+        if std::path::Path::new(&dir).is_dir() {
+            return Some(dir);
+        }
+    }
+    obsidian_vaults(app)
+        .into_iter()
+        .find(|p| std::path::Path::new(p).is_dir())
+}
+
+/// The vault "Save to Obsidian" would currently write to (explicit override, or
+/// Obsidian's open/most-recent vault). Lets Settings show the live target.
+#[tauri::command]
+pub fn detect_obsidian_vault(app: AppHandle, db: State<db::Db>) -> CmdResult<Option<String>> {
+    let conn = db.0.lock().map_err(err)?;
+    Ok(resolve_obsidian_vault(&conn, &app))
+}
+
 /// Save one note (and its whole branch) as an Obsidian-friendly Markdown file in
 /// the configured vault. Title/filename = the note's section name; collisions get
 /// a numbered suffix. Images in the branch are copied into <vault>/attachments and
 /// embedded by name. Returns the written file path.
 #[tauri::command]
-pub fn export_note_obsidian(db: State<db::Db>, id: i64) -> CmdResult<String> {
+pub fn export_note_obsidian(app: AppHandle, db: State<db::Db>, id: i64) -> CmdResult<String> {
     let (state, vault) = {
         let conn = db.0.lock().map_err(err)?;
-        let vault = db::get_setting(&conn, "obsidian_vault_dir").filter(|s| !s.is_empty());
+        // Resolve the vault live so an on-the-fly change in Obsidian or Settings
+        // is always honored.
+        let vault = resolve_obsidian_vault(&conn, &app);
         (db::get_state(&conn).map_err(err)?, vault)
     };
-    let vault = vault.ok_or("Set your Obsidian vault folder in Settings first")?;
+    let vault =
+        vault.ok_or("No Obsidian vault found — set one in Settings, or open a vault in Obsidian")?;
     let vault_dir = std::path::PathBuf::from(&vault);
     if !vault_dir.is_dir() {
         return Err("Your Obsidian vault folder no longer exists".into());
@@ -911,6 +973,11 @@ pub fn set_sound_pref(
 pub fn add_child(app: AppHandle, db: State<db::Db>, parent_id: i64, content: String) -> CmdResult<i64> {
     let id = {
         let conn = db.0.lock().map_err(err)?;
+        match db::item_depth(&conn, parent_id) {
+            Some(d) if d < db::MAX_BRANCH_DEPTH => {}
+            Some(_) => return Err("Maximum nesting depth reached".into()),
+            None => return Err("That note no longer exists".into()),
+        }
         let section_id: Option<i64> = conn
             .query_row(
                 "SELECT section_id FROM items WHERE id = ?1",

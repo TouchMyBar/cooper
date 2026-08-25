@@ -265,25 +265,48 @@ pub fn insert_image_item(
 /// Insert a note as a branch child of `parent` when sub-branch mode is armed and
 /// `parent` is still a valid top-level item; otherwise insert it top-level in the
 /// active section. Returns the new item id. Shared by capture and typed-note paths.
+/// Deepest allowed branch nesting (a top-level item is depth 0, so this permits
+/// ten levels of sub-branches beneath it).
+pub const MAX_BRANCH_DEPTH: i64 = 10;
+
+/// Depth of an item in its branch (0 = top-level). `None` if it doesn't exist.
+pub fn item_depth(conn: &Connection, id: i64) -> Option<i64> {
+    conn.query_row(
+        "WITH RECURSIVE anc(id, pid, d) AS (
+           SELECT id, parent_id, 0 FROM items WHERE id = ?1
+           UNION ALL
+           SELECT items.id, items.parent_id, anc.d + 1 FROM items JOIN anc ON items.id = anc.pid
+         )
+         SELECT MAX(d) FROM anc",
+        params![id],
+        |r| r.get::<_, Option<i64>>(0),
+    )
+    .ok()
+    .flatten()
+}
+
 pub fn insert_note_maybe_child(
     conn: &Connection,
     text: &str,
     parent: Option<i64>,
 ) -> rusqlite::Result<i64> {
     if let Some(pid) = parent {
-        // Only nest under a still-existing TOP-LEVEL item (branches are depth-1).
-        let section: Option<Option<i64>> = conn
-            .query_row(
-                "SELECT section_id FROM items WHERE id = ?1 AND parent_id IS NULL",
-                params![pid],
-                |r| r.get::<_, Option<i64>>(0),
-            )
-            .optional()?;
-        if let Some(section_id) = section {
-            let id = insert_child_item(conn, text, pid, section_id)?;
-            // Make sure the newly-added sub-point is visible.
-            conn.execute("UPDATE items SET collapsed = 0 WHERE id = ?1", params![pid])?;
-            return Ok(id);
+        // Nest under the sticky parent (at any level) as long as it still exists
+        // and is shallower than the depth cap, so a new child stays within it.
+        if let Some(depth) = item_depth(conn, pid) {
+            if depth < MAX_BRANCH_DEPTH {
+                let section_id: Option<i64> = conn
+                    .query_row(
+                        "SELECT section_id FROM items WHERE id = ?1",
+                        params![pid],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(None);
+                let id = insert_child_item(conn, text, pid, section_id)?;
+                // Make sure the newly-added sub-point is visible.
+                conn.execute("UPDATE items SET collapsed = 0 WHERE id = ?1", params![pid])?;
+                return Ok(id);
+            }
         }
     }
     let active = get_active_section(conn);

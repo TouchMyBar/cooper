@@ -606,6 +606,7 @@ dependencies = [
  "rdev",
  "rusqlite",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",

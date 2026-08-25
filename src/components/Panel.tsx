@@ -15,6 +15,8 @@ import { eventToAccel, resolveBinds } from "../keybinds";
 
 const IS_MAC = navigator.userAgent.includes("Mac");
 const MOD = IS_MAC ? "⌘" : "Ctrl";
+// Deepest branch nesting (top-level = 0). Mirrors db::MAX_BRANCH_DEPTH.
+const MAX_BRANCH_DEPTH = 10;
 
 // Read a Blob into (base64, ext) for handing raw image bytes to the backend.
 function readImageBlob(blob: Blob): Promise<{ base64: string; ext: string }> {
@@ -365,17 +367,33 @@ export default function Panel() {
   // its visible inline children.
   const flatIds = useMemo(() => {
     const ids: number[] = [];
-    for (const g of groups) {
-      for (const it of g.items) {
-        ids.push(it.id);
-        if (it.branchStyle === "inline" && !it.collapsed) {
-          for (const c of childrenByParent.get(it.id) ?? []) ids.push(c.id);
-        }
+    // Recurse through every visible inline level (top items keep their panel
+    // style; deeper levels are always inline).
+    const walk = (it: Item, depth: number) => {
+      ids.push(it.id);
+      const inline = depth < MAX_BRANCH_DEPTH && (depth > 0 || it.branchStyle === "inline");
+      if (inline && !it.collapsed) {
+        for (const c of childrenByParent.get(it.id) ?? []) walk(c, depth + 1);
       }
-    }
+    };
+    for (const g of groups) for (const it of g.items) walk(it, 0);
     return ids;
   }, [groups, childrenByParent]);
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items]);
+  // Depth of each item (0 = top-level), memoized for the branch-depth cap.
+  const depthById = useMemo(() => {
+    const m = new Map<number, number>();
+    const depthOf = (id: number): number => {
+      const cached = m.get(id);
+      if (cached !== undefined) return cached;
+      const it = itemById.get(id);
+      const d = it && it.parentId != null ? depthOf(it.parentId) + 1 : 0;
+      m.set(id, d);
+      return d;
+    };
+    for (const i of items) depthOf(i.id);
+    return m;
+  }, [items, itemById]);
   const binds = useMemo(() => resolveBinds(state?.keybinds), [state?.keybinds]);
 
   // Any section switch/create exits sub-branch mode ("Ctrl+K to start the top again").
@@ -445,21 +463,22 @@ export default function Panel() {
       // Include a parent's branch children as indented sub-bullets, skipping any
       // child already in the selection to avoid duplication.
       const selectedSet = new Set(textItems.map((i) => i.id));
-      const lineFor = (i: Item, indent: string) => {
+      // Emit an item and its whole (non-selected) branch as indented bullets.
+      const bulletTree = (i: Item, indent: string): string => {
         let out = `${indent}- ${i.content.replace(/\n/g, `\n${indent}  `)}`;
         for (const c of childrenByParent.get(i.id) ?? []) {
-          if (!selectedSet.has(c.id)) out += `\n${indent}  - ${c.content.replace(/\n/g, `\n${indent}    `)}`;
+          if (!selectedSet.has(c.id)) out += `\n${bulletTree(c, `${indent}  `)}`;
         }
         return out;
       };
       const text = asList
-        ? textItems.map((i) => lineFor(i, "")).join("\n")
+        ? textItems.map((i) => bulletTree(i, "")).join("\n")
         : textItems
             .map((i) => {
-              const kids = (childrenByParent.get(i.id) ?? []).filter((c) => !selectedSet.has(c.id));
-              return kids.length
-                ? `${i.content}\n${kids.map((c) => `- ${c.content}`).join("\n")}`
-                : i.content;
+              const kidLines = (childrenByParent.get(i.id) ?? [])
+                .filter((c) => !selectedSet.has(c.id))
+                .map((c) => bulletTree(c, ""));
+              return kidLines.length ? `${i.content}\n${kidLines.join("\n")}` : i.content;
             })
             .join("\n\n");
       api.copyText(text).then(() => flashToast(asList ? "Copied as list" : "Copied"));
@@ -477,11 +496,18 @@ export default function Panel() {
   );
 
   // Create a branch sub-point under a parent and drop straight into editing it.
-  const createChild = useCallback(async (parentId: number) => {
-    await api.setItemCollapsed(parentId, false);
-    const newId = await api.addChild(parentId, "");
-    setEditingId(newId);
-  }, []);
+  const createChild = useCallback(
+    async (parentId: number) => {
+      try {
+        await api.setItemCollapsed(parentId, false);
+        const newId = await api.addChild(parentId, "");
+        setEditingId(newId);
+      } catch (e) {
+        flashToast(typeof e === "string" ? e : "Couldn't add sub-point");
+      }
+    },
+    [flashToast],
+  );
 
   // Save a note + its whole branch as an Obsidian-friendly .md in the vault.
   const exportObsidian = useCallback(
@@ -636,16 +662,24 @@ export default function Panel() {
         copySelection(true);
       } else if (accel && accel === binds.createBranch && selected.length === 1) {
         const it = itemById.get(selected[0]);
-        if (it && it.kind !== "image" && it.parentId === null) {
+        if (it && it.kind !== "image") {
           e.preventDefault();
-          // On the LAST top-level note of the active section, Ctrl+B arms
-          // sub-branch mode (captures/typed notes nest under it); elsewhere it
-          // keeps the classic "insert an empty sub-point and edit it" behavior.
-          const activeTop =
-            groups.find((g) => (g.section?.id ?? null) === activeSectionId)?.items ?? [];
-          const isLast = activeTop.length > 0 && activeTop[activeTop.length - 1].id === it.id;
-          if (isLast) armSubBranch(it.id);
-          else createChild(it.id);
+          const depth = depthById.get(it.id) ?? 0;
+          if (depth >= MAX_BRANCH_DEPTH) {
+            flashToast(`Max nesting is ${MAX_BRANCH_DEPTH} levels`);
+          } else {
+            // On the LAST note of its group (top-level in the section, or the last
+            // child of its parent) Ctrl+B arms sub-branch mode so captures/typed
+            // notes nest under it — works at any depth, so you can sub-branch a
+            // sub-branch. Elsewhere it just inserts an empty sub-point to edit.
+            const siblings =
+              it.parentId === null
+                ? groups.find((g) => (g.section?.id ?? null) === activeSectionId)?.items ?? []
+                : childrenByParent.get(it.parentId) ?? [];
+            const isLast = siblings.length > 0 && siblings[siblings.length - 1].id === it.id;
+            if (isLast) armSubBranch(it.id);
+            else createChild(it.id);
+          }
         }
       }
     };
@@ -676,6 +710,9 @@ export default function Panel() {
     subBranchParentId,
     armSubBranch,
     disarmSubBranch,
+    childrenByParent,
+    depthById,
+    flashToast,
   ]);
 
   const submitInput = async () => {
@@ -710,8 +747,10 @@ export default function Panel() {
     const single = targets.length === 1;
     const target = single ? targets[0] : null;
     const singleImage = single && target!.kind === "image";
-    const isChild = single && target!.parentId !== null;
-    const canBranch = single && !singleImage && !isChild;
+    const targetDepth = single ? depthById.get(target!.id) ?? 0 : 0;
+    const isTop = single && target!.parentId === null;
+    // Branching is allowed at any level up to the depth cap (sub-branch a sub-branch).
+    const canBranch = single && !singleImage && targetDepth < MAX_BRANCH_DEPTH;
     const hasChildren = single ? (childrenByParent.get(target!.id)?.length ?? 0) > 0 : false;
     const panelStyle = single && target!.branchStyle === "panel";
 
@@ -761,7 +800,9 @@ export default function Panel() {
         separatorBefore: true,
         onClick: () => createChild(target!.id),
       });
-      if (hasChildren) {
+      if (hasChildren && isTop) {
+        // Side-panel branch style only applies to top-level notes; deeper levels
+        // are always shown inline.
         entries.push({
           label: panelStyle ? "Show Inline" : "Show as Side Panel",
           onClick: async () => {
@@ -871,7 +912,9 @@ export default function Panel() {
   const renderItem = (item: Item, depth: number): React.ReactNode => {
     const kids = childrenByParent.get(item.id) ?? [];
     const hasKids = kids.length > 0;
-    const inlineBranch = depth === 0 && item.branchStyle === "inline";
+    // Top-level notes honor their panel/inline style; deeper levels are always
+    // inline, recursing until the depth cap.
+    const inlineBranch = depth < MAX_BRANCH_DEPTH && (depth > 0 || item.branchStyle === "inline");
     const finishEdit = async (content: string) => {
       const trimmed = content.trim();
       if (!trimmed && item.parentId !== null && !item.content.trim()) {

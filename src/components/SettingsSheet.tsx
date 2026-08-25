@@ -20,6 +20,7 @@ export default function SettingsSheet({ onClose }: { onClose: () => void }) {
   );
   const [exportDir, setExportDir] = useState("");
   const [vaultDir, setVaultDir] = useState("");
+  const [detectedVault, setDetectedVault] = useState<string | null>(null);
   const [showEditor, setShowEditor] = useState(false);
   const fileFor = useRef<"capture" | "newNote" | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -33,6 +34,7 @@ export default function SettingsSheet({ onClose }: { onClose: () => void }) {
         setVaultDir(s.obsidianVaultDir);
       })
       .catch(() => {});
+    api.detectObsidianVault().then(setDetectedVault).catch(() => setDetectedVault(null));
   }, []);
 
   useEffect(() => {
@@ -104,14 +106,23 @@ export default function SettingsSheet({ onClose }: { onClose: () => void }) {
   const browseObsidian = async () => {
     const sel = await open({
       directory: true,
-      defaultPath: vaultDir || undefined,
+      defaultPath: vaultDir || detectedVault || undefined,
       title: "Choose your Obsidian vault folder",
     });
     if (typeof sel === "string") {
       await api.setObsidianVaultDir(sel);
       setVaultDir(sel);
-      setNote("Obsidian vault folder set.");
+      setNote("Obsidian vault pinned.");
     }
+  };
+
+  // Clear the pinned override so exports follow Obsidian's current vault again.
+  const useAutoVault = async () => {
+    await api.setObsidianVaultDir("");
+    setVaultDir("");
+    const d = await api.detectObsidianVault().catch(() => null);
+    setDetectedVault(d);
+    setNote(d ? "Using your current Obsidian vault." : "No open Obsidian vault found yet.");
   };
 
   if (showEditor) return <ShortcutsEditor onClose={() => setShowEditor(false)} />;
@@ -202,15 +213,28 @@ export default function SettingsSheet({ onClose }: { onClose: () => void }) {
           </div>
         </div>
 
-        {/* Obsidian — save notes as .md into a vault */}
+        {/* Obsidian — save notes as .md into a vault. Auto-follows Obsidian's
+            current vault unless a folder is pinned. */}
         <div className="settings-section-title">Obsidian</div>
         <div className="settings-card">
           <div className="settings-row">
-            <span className="settings-label">Vault folder</span>
+            <span className="settings-label">Vault {vaultDir ? "(pinned)" : "(auto)"}</span>
             <span className="settings-value">
-              <span className="settings-path" title={vaultDir || "Not set"}>
-                {vaultDir || "Not set"}
+              <span
+                className="settings-path"
+                title={vaultDir || detectedVault || "No vault detected"}
+              >
+                {vaultDir || detectedVault || "Open a vault in Obsidian"}
               </span>
+              {vaultDir && (
+                <button
+                  className="settings-btn"
+                  onClick={useAutoVault}
+                  title="Follow Obsidian's current vault instead"
+                >
+                  Auto
+                </button>
+              )}
               <button className="settings-btn" onClick={browseObsidian}>
                 Browse…
               </button>
