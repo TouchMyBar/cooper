@@ -55,7 +55,37 @@ pub fn position(win: &WebviewWindow) {
     let _ = win.set_position(PhysicalPosition::new(x, y));
 }
 
+/// Run a window operation on the main thread.
+///
+/// macOS only: the double-shift listener calls these from its own event-tap
+/// thread, where `is_visible()`/`is_focused()` fail. `toggle` reads those
+/// through `unwrap_or(false)`, so off-thread it always concluded the panel was
+/// hidden and took the "show" branch — meaning Right Shift x2 could never hide
+/// the panel, and re-showing an already-visible one looked like a dead
+/// shortcut. Other platforms keep calling these inline, where they already work.
+fn on_main(app: &AppHandle, f: impl FnOnce(&AppHandle) + Send + 'static) {
+    #[cfg(target_os = "macos")]
+    {
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || f(&handle));
+    }
+    #[cfg(not(target_os = "macos"))]
+    f(app);
+}
+
 pub fn show(app: &AppHandle) {
+    on_main(app, show_now);
+}
+
+pub fn hide(app: &AppHandle) {
+    on_main(app, hide_now);
+}
+
+pub fn toggle(app: &AppHandle) {
+    on_main(app, toggle_now);
+}
+
+fn show_now(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         if !win.is_focused().unwrap_or(false) {
             foreground::remember();
@@ -67,14 +97,14 @@ pub fn show(app: &AppHandle) {
     }
 }
 
-pub fn hide(app: &AppHandle) {
+fn hide_now(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.hide();
         foreground::restore();
     }
 }
 
-pub fn toggle(app: &AppHandle) {
+fn toggle_now(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         let visible = win.is_visible().unwrap_or(false);
         let focused = win.is_focused().unwrap_or(false);
@@ -86,7 +116,7 @@ pub fn toggle(app: &AppHandle) {
             let _ = win.set_focus();
             let _ = app.emit("panel-shown", ());
         } else {
-            show(app);
+            show_now(app);
         }
     }
 }

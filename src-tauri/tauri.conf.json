@@ -46,6 +46,9 @@
     ],
     "category": "Productivity",
     "shortDescription": "Capture things you want to keep while working with AI.",
-    "longDescription": "Cooper combines the useful parts of a to-do list, a clipboard, and a scratchpad. It sits next to where you work, is always one shortcut away, and works with all your AI apps, terminals and browsers. Local and private — no sync, no account."
+    "longDescription": "Cooper combines the useful parts of a to-do list, a clipboard, and a scratchpad. It sits next to where you work, is always one shortcut away, and works with all your AI apps, terminals and browsers. Local and private \u2014 no sync, no account.",
+    "macOS": {
+      "signingIdentity": "-"
+    }
   }
 }

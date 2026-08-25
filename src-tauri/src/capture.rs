@@ -130,7 +130,12 @@ fn do_capture(app: &AppHandle) -> Result<(), String> {
 
     // Let the user's shift release settle before injecting the copy chord.
     std::thread::sleep(Duration::from_millis(60));
-    send_copy(app)?;
+    if let Err(e) = send_copy(app) {
+        // Never bail out still holding the sentinel: that would leave the user
+        // with an invisible zero-width string where their clipboard used to be.
+        restore(&mut clip, old);
+        return Err(e);
+    }
 
     let mut captured = None;
     for _ in 0..14 {
@@ -150,17 +155,22 @@ fn do_capture(app: &AppHandle) -> Result<(), String> {
         }
         None => {
             // Nothing was selected; put the previous clipboard back.
-            match old {
-                Some(o) => {
-                    let _ = clip.set_text(o);
-                }
-                None => {
-                    let _ = clip.clear();
-                }
-            }
+            restore(&mut clip, old);
         }
     }
     Ok(())
+}
+
+/// Undo the sentinel, leaving the clipboard exactly as we found it.
+fn restore(clip: &mut arboard::Clipboard, old: Option<String>) {
+    match old {
+        Some(text) => {
+            let _ = clip.set_text(text);
+        }
+        None => {
+            let _ = clip.clear();
+        }
+    }
 }
 
 /// Capture the clipboard as-is, without simulating a copy (tray menu action).
