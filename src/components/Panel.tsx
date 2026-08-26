@@ -509,12 +509,16 @@ export default function Panel() {
     [flashToast],
   );
 
-  // Save a note + its whole branch as an Obsidian-friendly .md in the vault.
+  // Save notes + their whole branches to the vault (one .md per section).
   const exportObsidian = useCallback(
-    (id: number) => {
+    (ids: number[]) => {
       api
-        .exportNoteObsidian(id)
-        .then(() => flashToast("Saved to Obsidian"))
+        .exportNotesObsidian(ids)
+        .then((paths) =>
+          flashToast(
+            paths.length > 1 ? `Saved ${paths.length} notes to Obsidian` : "Saved to Obsidian",
+          ),
+        )
         .catch((e) => flashToast(typeof e === "string" ? e : "Obsidian save failed"));
     },
     [flashToast],
@@ -817,13 +821,11 @@ export default function Panel() {
       }
     }
 
-    if (single) {
-      entries.push({
-        label: "Save to Obsidian",
-        separatorBefore: true,
-        onClick: () => exportObsidian(ids[0]),
-      });
-    }
+    entries.push({
+      label: single ? "Save to Obsidian" : `Save ${targets.length} to Obsidian`,
+      separatorBefore: true,
+      onClick: () => exportObsidian(ids),
+    });
 
     entries.push({
       label: targets.length > 1 ? `Delete ${targets.length} items` : "Delete",

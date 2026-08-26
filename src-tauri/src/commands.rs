@@ -659,12 +659,37 @@ pub fn detect_obsidian_vault(app: AppHandle, db: State<db::Db>) -> CmdResult<Opt
     Ok(resolve_obsidian_vault(&conn, &app))
 }
 
-/// Save one note (and its whole branch) as an Obsidian-friendly Markdown file in
-/// the configured vault. Title/filename = the note's section name; collisions get
-/// a numbered suffix. Images in the branch are copied into <vault>/attachments and
-/// embedded by name. Returns the written file path.
+/// True if any ancestor of `it` is itself in `selected` — such a note is already
+/// rendered inside that ancestor's branch, so exporting it again would duplicate it.
+fn has_selected_ancestor(
+    items: &[db::Item],
+    it: &db::Item,
+    selected: &std::collections::HashSet<i64>,
+) -> bool {
+    let mut cur = it;
+    while let Some(pid) = cur.parent_id {
+        if selected.contains(&pid) {
+            return true;
+        }
+        match items.iter().find(|p| p.id == pid) {
+            Some(p) => cur = p,
+            None => break,
+        }
+    }
+    false
+}
+
+/// Save the selected notes (each with its whole branch) into the configured vault
+/// as Obsidian-friendly Markdown — one file per section, since title/filename is
+/// the section name and the notes are its bullets. Collisions get a numbered
+/// suffix. Images are copied into <vault>/attachments and embedded by name.
+/// Returns the written file paths.
 #[tauri::command]
-pub fn export_note_obsidian(app: AppHandle, db: State<db::Db>, id: i64) -> CmdResult<String> {
+pub fn export_notes_obsidian(
+    app: AppHandle,
+    db: State<db::Db>,
+    ids: Vec<i64>,
+) -> CmdResult<Vec<String>> {
     let (state, vault) = {
         let conn = db.0.lock().map_err(err)?;
         // Resolve the vault live so an on-the-fly change in Obsidian or Settings
@@ -679,68 +704,97 @@ pub fn export_note_obsidian(app: AppHandle, db: State<db::Db>, id: i64) -> CmdRe
         return Err("Your Obsidian vault folder no longer exists".into());
     }
 
-    let root = state
+    // Keep only the topmost note of each selected branch, in board order.
+    let selected: std::collections::HashSet<i64> = ids.iter().copied().collect();
+    let roots: Vec<&db::Item> = state
         .items
         .iter()
-        .find(|i| i.id == id)
-        .ok_or("That note no longer exists")?;
-
-    let section_name = root
-        .section_id
-        .and_then(|sid| state.sections.iter().find(|s| s.id == sid))
-        .map(|s| s.name.clone())
-        .unwrap_or_else(|| "Inbox".to_string());
-
-    // Copy every image in the branch (image items + text attachments) into the
-    // vault's attachments folder, then embed by bare name.
-    let mut ids = Vec::new();
-    collect_subtree_ids(&state.items, id, &mut ids);
-    let idset: std::collections::HashSet<i64> = ids.iter().copied().collect();
-    let mut image_files: Vec<String> = state
-        .items
-        .iter()
-        .filter(|i| idset.contains(&i.id) && i.kind == "image")
-        .map(|i| i.content.clone())
+        .filter(|i| selected.contains(&i.id) && !has_selected_ancestor(&state.items, i, &selected))
         .collect();
-    image_files.extend(
-        state
-            .attachments
-            .iter()
-            .filter(|a| idset.contains(&a.item_id))
-            .map(|a| a.path.clone()),
-    );
-    if !image_files.is_empty() {
-        let att_dir = vault_dir.join("attachments");
-        std::fs::create_dir_all(&att_dir).map_err(err)?;
-        for src in &image_files {
-            let dest = att_dir.join(file_basename(src));
-            if !dest.exists() {
-                let _ = std::fs::copy(src, &dest);
-            }
+    if roots.is_empty() {
+        return Err("Those notes no longer exist".into());
+    }
+
+    // Group by section, preserving the order sections first appear.
+    let mut groups: Vec<(Option<i64>, Vec<&db::Item>)> = Vec::new();
+    for r in roots {
+        match groups.iter_mut().find(|(sid, _)| *sid == r.section_id) {
+            Some((_, members)) => members.push(r),
+            None => groups.push((r.section_id, vec![r])),
         }
     }
 
-    let mut md = String::new();
-    md.push_str("---\n");
-    md.push_str(&format!("title: {}\n", yaml_str(&section_name)));
-    md.push_str(&format!("created: {}\n", iso_date(root.created_at)));
-    md.push_str("source: Cooper\n");
-    md.push_str(&format!("section: {}\n", yaml_str(&section_name)));
-    md.push_str("tags:\n  - cooper\n");
-    md.push_str(&format!("cooper_id: {}\n", root.id));
-    md.push_str("---\n\n");
-    render_obsidian_tree(&state.items, &state.attachments, root, 0, &mut md);
+    let mut written = Vec::new();
+    for (section_id, members) in &groups {
+        let section_name = section_id
+            .and_then(|sid| state.sections.iter().find(|s| s.id == sid))
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| "Inbox".to_string());
 
-    // Filename = section name, de-duplicated with " 2", " 3", …
-    let base = sanitize_filename(&section_name);
-    let mut path = vault_dir.join(format!("{base}.md"));
-    let mut n = 2;
-    while path.exists() {
-        path = vault_dir.join(format!("{base} {n}.md"));
-        n += 1;
+        // Copy every image in these branches (image items + text attachments)
+        // into the vault's attachments folder, then embed by bare name.
+        let mut subtree = Vec::new();
+        for m in members {
+            collect_subtree_ids(&state.items, m.id, &mut subtree);
+        }
+        let idset: std::collections::HashSet<i64> = subtree.iter().copied().collect();
+        let mut image_files: Vec<String> = state
+            .items
+            .iter()
+            .filter(|i| idset.contains(&i.id) && i.kind == "image")
+            .map(|i| i.content.clone())
+            .collect();
+        image_files.extend(
+            state
+                .attachments
+                .iter()
+                .filter(|a| idset.contains(&a.item_id))
+                .map(|a| a.path.clone()),
+        );
+        if !image_files.is_empty() {
+            let att_dir = vault_dir.join("attachments");
+            std::fs::create_dir_all(&att_dir).map_err(err)?;
+            for src in &image_files {
+                let dest = att_dir.join(file_basename(src));
+                if !dest.exists() {
+                    let _ = std::fs::copy(src, &dest);
+                }
+            }
+        }
+
+        let created = members.iter().map(|m| m.created_at).min().unwrap_or(0);
+        let mut md = String::new();
+        md.push_str("---\n");
+        md.push_str(&format!("title: {}\n", yaml_str(&section_name)));
+        md.push_str(&format!("created: {}\n", iso_date(created)));
+        md.push_str("source: Cooper\n");
+        md.push_str(&format!("section: {}\n", yaml_str(&section_name)));
+        md.push_str("tags:\n  - cooper\n");
+        if members.len() == 1 {
+            md.push_str(&format!("cooper_id: {}\n", members[0].id));
+        } else {
+            md.push_str("cooper_ids:\n");
+            for m in members {
+                md.push_str(&format!("  - {}\n", m.id));
+            }
+        }
+        md.push_str("---\n\n");
+        for m in members {
+            render_obsidian_tree(&state.items, &state.attachments, m, 0, &mut md);
+        }
+
+        // Filename = section name, de-duplicated with " 2", " 3", …
+        let base = sanitize_filename(&section_name);
+        let mut path = vault_dir.join(format!("{base}.md"));
+        let mut n = 2;
+        while path.exists() {
+            path = vault_dir.join(format!("{base} {n}.md"));
+            n += 1;
+        }
+        std::fs::write(&path, md).map_err(err)?;
+        written.push(path.to_string_lossy().into_owned());
     }
-    std::fs::write(&path, md).map_err(err)?;
-    Ok(path.to_string_lossy().into_owned())
+    Ok(written)
 }
 
 /// Persist the JSON map of shortcut overrides.
