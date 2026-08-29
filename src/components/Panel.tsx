@@ -635,17 +635,35 @@ export default function Panel() {
         e.preventDefault();
         setTabMode(false);
         if (!flatIds.length) return;
-        const current = anchor !== null ? flatIds.indexOf(anchor) : -1;
-        const next =
-          e.key === "ArrowDown"
-            ? Math.min(current + 1, flatIds.length - 1)
-            : Math.max(current === -1 ? flatIds.length - 1 : current - 1, 0);
-        const id = flatIds[next];
-        setSelected([id]);
-        setAnchor(id);
-        document
-          .querySelector(`[data-item-id="${id}"]`)
-          ?.scrollIntoView({ block: "nearest" });
+        const dir = e.key === "ArrowDown" ? 1 : -1;
+        const anchorIdx = anchor !== null ? flatIds.indexOf(anchor) : -1;
+        if (e.shiftKey && anchorIdx !== -1) {
+          // Shift+Arrow extends a contiguous range: the anchor stays put as the
+          // pivot while the opposite end of the current selection is the moving
+          // lead, so holding Shift and tapping down/up grows (or shrinks) the list.
+          const idxs = selected.map((s) => flatIds.indexOf(s)).filter((i) => i !== -1);
+          const lo = idxs.length ? Math.min(...idxs) : anchorIdx;
+          const hi = idxs.length ? Math.max(...idxs) : anchorIdx;
+          const leadIdx = anchorIdx === lo ? hi : lo;
+          const nextLead = Math.min(Math.max(leadIdx + dir, 0), flatIds.length - 1);
+          setSelected(
+            flatIds.slice(Math.min(anchorIdx, nextLead), Math.max(anchorIdx, nextLead) + 1),
+          );
+          document
+            .querySelector(`[data-item-id="${flatIds[nextLead]}"]`)
+            ?.scrollIntoView({ block: "nearest" });
+        } else {
+          const next =
+            dir === 1
+              ? Math.min(anchorIdx + 1, flatIds.length - 1)
+              : Math.max(anchorIdx === -1 ? flatIds.length - 1 : anchorIdx - 1, 0);
+          const id = flatIds[next];
+          setSelected([id]);
+          setAnchor(id);
+          document
+            .querySelector(`[data-item-id="${id}"]`)
+            ?.scrollIntoView({ block: "nearest" });
+        }
       } else if (accel && accel === binds.markDone && selected.length) {
         e.preventDefault();
         selected.forEach((id) => api.toggleDone(id));
