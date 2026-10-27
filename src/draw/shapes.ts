@@ -4,8 +4,11 @@
 // (plus the browser 2D canvas API for rendering / measuring). No React, no
 // Tauri, no external libraries — this module is safe to unit-test or reuse.
 
-/** The tools the editor exposes. "select" is not a shape type. */
-export type Tool = "select" | "pen" | "line" | "arrow" | "rect" | "ellipse" | "text";
+/**
+ * The tools the editor exposes. "select" (shown as Move) and "eraser" act on
+ * shapes rather than being shape types themselves.
+ */
+export type Tool = "select" | "pen" | "eraser" | "line" | "arrow" | "rect" | "ellipse" | "text";
 
 /**
  * One drawable thing on the canvas.
@@ -18,7 +21,7 @@ export type Tool = "select" | "pen" | "line" | "arrow" | "rect" | "ellipse" | "t
  */
 export interface Shape {
   id: number;
-  type: Exclude<Tool, "select">;
+  type: Exclude<Tool, "select" | "eraser">;
   color: string;
   width: number;
   points?: { x: number; y: number }[];

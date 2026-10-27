@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { renderInline } from "../markdown";
 import { imageDataCached } from "../store";
+import type { TagDef } from "../tags";
 import type { Attachment, Item } from "../types";
 
 function ImageBody({ item, onCopy }: { item: Item; onCopy: () => void }) {
@@ -89,15 +90,22 @@ interface Props {
   selected: boolean;
   /** Sub-branch mode is armed on this note (captures nest under it). */
   armed?: boolean;
+  /** Being dragged to another section (the card stays put, dimmed). */
+  lifted?: boolean;
+  /** Carries the color tagging mode is stamping, so it wears a tint of it. */
+  tinted?: boolean;
   editing: boolean;
   depth?: number;
   attachments?: Attachment[];
+  /** This note's tags, in palette order. */
+  tagDefs?: TagDef[];
   hasChildren?: boolean;
   childCount?: number;
   branchCollapsed?: boolean;
   branchStyle?: string;
   onClick: (e: React.MouseEvent) => void;
   onContextMenu: (e: React.MouseEvent) => void;
+  onPointerDown?: (e: React.PointerEvent) => void;
   onToggleDone: () => void;
   onEditSave: (content: string) => void;
   onEditCancel: () => void;
@@ -113,15 +121,19 @@ export default function ItemCard({
   item,
   selected,
   armed = false,
+  lifted = false,
+  tinted = false,
   editing,
   depth = 0,
   attachments,
+  tagDefs = [],
   hasChildren = false,
   childCount = 0,
   branchCollapsed = false,
   branchStyle = "inline",
   onClick,
   onContextMenu,
+  onPointerDown,
   onToggleDone,
   onEditSave,
   onEditCancel,
@@ -154,9 +166,18 @@ export default function ItemCard({
   const inlineTri = hasChildren && (depth > 0 || branchStyle === "inline");
   const panelBadge = depth === 0 && hasChildren && branchStyle === "panel";
 
+  // A tagged note's circle wears its tag color (split evenly between several);
+  // marking it done fills the circle with that color behind the check.
+  const n = tagDefs.length;
+  const ring = tagDefs
+    .map((t, i) => `${t.color} ${(i / n) * 100}% ${((i + 1) / n) * 100}%`)
+    .join(", ");
+
   const classes = ["card"];
   if (selected) classes.push("selected");
   if (armed) classes.push("sub-branch-parent");
+  if (lifted) classes.push("lifted");
+  if (tinted) classes.push("tinted");
   if (item.done) classes.push("done");
   if (isImage) classes.push("card-image-item");
   if (depth > 0) classes.push("is-child");
@@ -168,6 +189,7 @@ export default function ItemCard({
       data-item-kind={item.kind}
       onClick={onClick}
       onContextMenu={onContextMenu}
+      onPointerDown={onPointerDown}
       onDoubleClick={onDoubleClick}
     >
       {inlineTri && (
@@ -184,7 +206,9 @@ export default function ItemCard({
         </button>
       )}
       <button
-        className={`check${item.done ? " checked" : ""}`}
+        className={`check${item.done ? " checked" : ""}${tagDefs.length ? " tagged" : ""}`}
+        style={ring ? ({ "--ring": `conic-gradient(${ring})` } as React.CSSProperties) : undefined}
+        aria-label={tagDefs.length ? `Tags: ${tagDefs.map((t) => t.name).join(", ")}` : undefined}
         title={item.done ? "Mark as not done" : "Mark as done"}
         onClick={(e) => {
           e.stopPropagation();

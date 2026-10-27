@@ -35,6 +35,8 @@ pub struct Item {
     pub branch_style: String,
     /// Inline-branch collapsed state (mirrors Section.collapsed).
     pub collapsed: bool,
+    /// Color tag ids (defined by the user's tag palette in `tag_prefs`).
+    pub tags: Vec<String>,
 }
 
 /// An image attached to a text item (a "mixed note").
@@ -65,6 +67,12 @@ pub struct AppState {
     pub obsidian_vault_dir: String,
     /// JSON map of action -> accelerator overrides ("{}" = all defaults).
     pub keybinds: String,
+    /// JSON tag palette + picker options (see src/tags.ts; "" = defaults).
+    pub tag_prefs: String,
+    /// Tag id that every new note gets ("" = tagging mode off).
+    pub capture_tag: String,
+    /// Panel page zoom (1.0 = 100%), remembered across launches.
+    pub zoom: f64,
 }
 
 pub fn now_ms() -> i64 {
@@ -118,6 +126,11 @@ pub fn init(path: &Path) -> rusqlite::Result<Connection> {
     );
     let _ = conn.execute(
         "ALTER TABLE items ADD COLUMN collapsed INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    // Color tags, comma-separated ("" = untagged).
+    let _ = conn.execute(
+        "ALTER TABLE items ADD COLUMN tags TEXT NOT NULL DEFAULT ''",
         [],
     );
     // Attachments (mixed notes): images bound to a text item. Idempotent.
@@ -188,7 +201,7 @@ pub fn list_sections(conn: &Connection) -> rusqlite::Result<Vec<Section>> {
 
 pub fn list_items(conn: &Connection) -> rusqlite::Result<Vec<Item>> {
     let mut stmt = conn.prepare(
-        "SELECT id, section_id, content, kind, done, created_at, updated_at, parent_id, branch_style, collapsed FROM items ORDER BY id",
+        "SELECT id, section_id, content, kind, done, created_at, updated_at, parent_id, branch_style, collapsed, tags FROM items ORDER BY id",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok(Item {
@@ -202,6 +215,12 @@ pub fn list_items(conn: &Connection) -> rusqlite::Result<Vec<Item>> {
             parent_id: r.get(7)?,
             branch_style: r.get(8)?,
             collapsed: r.get::<_, i64>(9)? != 0,
+            tags: r
+                .get::<_, String>(10)?
+                .split(',')
+                .filter(|t| !t.is_empty())
+                .map(String::from)
+                .collect(),
         })
     })?;
     rows.collect()
@@ -236,14 +255,30 @@ pub fn get_state(conn: &Connection) -> rusqlite::Result<AppState> {
         export_dir: get_setting(conn, "export_dir").unwrap_or_default(),
         obsidian_vault_dir: get_setting(conn, "obsidian_vault_dir").unwrap_or_default(),
         keybinds: get_setting(conn, "keybinds").unwrap_or_else(|| "{}".into()),
+        tag_prefs: get_setting(conn, "tag_prefs").unwrap_or_default(),
+        capture_tag: capture_tag(conn),
+        zoom: zoom(conn),
     })
+}
+
+/// Saved panel zoom, kept within the 50–200% the shortcuts allow.
+pub fn zoom(conn: &Connection) -> f64 {
+    get_setting(conn, "zoom")
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|z| z.is_finite())
+        .map_or(1.0, |z| z.clamp(0.5, 2.0))
+}
+
+/// The tag tagging mode stamps on every new note ("" = off).
+pub fn capture_tag(conn: &Connection) -> String {
+    get_setting(conn, "capture_tag").unwrap_or_default()
 }
 
 pub fn insert_item(conn: &Connection, content: &str, section_id: Option<i64>) -> rusqlite::Result<i64> {
     let t = now_ms();
     conn.execute(
-        "INSERT INTO items(section_id, content, kind, done, created_at, updated_at) VALUES(?1, ?2, 'text', 0, ?3, ?3)",
-        params![section_id, content, t],
+        "INSERT INTO items(section_id, content, kind, done, created_at, updated_at, tags) VALUES(?1, ?2, 'text', 0, ?3, ?3, ?4)",
+        params![section_id, content, t, capture_tag(conn)],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -256,8 +291,8 @@ pub fn insert_image_item(
 ) -> rusqlite::Result<i64> {
     let t = now_ms();
     conn.execute(
-        "INSERT INTO items(section_id, content, kind, done, created_at, updated_at) VALUES(?1, ?2, 'image', 0, ?3, ?3)",
-        params![section_id, path, t],
+        "INSERT INTO items(section_id, content, kind, done, created_at, updated_at, tags) VALUES(?1, ?2, 'image', 0, ?3, ?3, ?4)",
+        params![section_id, path, t, capture_tag(conn)],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -322,8 +357,8 @@ pub fn insert_child_item(
 ) -> rusqlite::Result<i64> {
     let t = now_ms();
     conn.execute(
-        "INSERT INTO items(section_id, content, kind, done, created_at, updated_at, parent_id) VALUES(?1, ?2, 'text', 0, ?3, ?3, ?4)",
-        params![section_id, content, t, parent_id],
+        "INSERT INTO items(section_id, content, kind, done, created_at, updated_at, parent_id, tags) VALUES(?1, ?2, 'text', 0, ?3, ?3, ?4, ?5)",
+        params![section_id, content, t, parent_id, capture_tag(conn)],
     )?;
     Ok(conn.last_insert_rowid())
 }

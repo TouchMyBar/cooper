@@ -1,6 +1,6 @@
 [package]
 name = "cooper"
-version = "0.3.75"
+version = "0.4.0"
 description = "Cooper — a FOSS capture panel for AI-assisted work"
 authors = ["Cooper contributors"]
 license = "Apache-2.0"

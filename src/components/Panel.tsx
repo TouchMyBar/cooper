@@ -3,7 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { api, useAppState, useMacSetup } from "../store";
 import type { Attachment, Item, Section } from "../types";
 import BranchPanel from "./BranchPanel";
-import ContextMenu, { MenuEntry } from "./ContextMenu";
+import ContextMenu, { MenuEntry, MenuRow } from "./ContextMenu";
 import ItemCard from "./ItemCard";
 import MacSetupSheet from "./MacSetupSheet";
 import SectionSwitcher from "./SectionSwitcher";
@@ -12,11 +12,17 @@ import SettingsSheet from "./SettingsSheet";
 import { runUpdateCheck } from "../update";
 import { loadSoundPrefs, play } from "../sounds";
 import { eventToAccel, resolveBinds } from "../keybinds";
+import { parseTagPrefs, tintVars, type TagDef } from "../tags";
 
 const IS_MAC = navigator.userAgent.includes("Mac");
 const MOD = IS_MAC ? "⌘" : "Ctrl";
 // Deepest branch nesting (top-level = 0). Mirrors db::MAX_BRANCH_DEPTH.
 const MAX_BRANCH_DEPTH = 10;
+// How long a note must be held before it lifts for dragging to another section;
+// a quicker press-and-drag still selects text inside the card.
+const HOLD_MS = 250;
+// Browser-style zoom levels for Ctrl/⌘ + and −. Mirrors the 50–200% clamp in Rust.
+const ZOOM_STEPS = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 
 // Read a Blob into (base64, ext) for handing raw image bytes to the backend.
 function readImageBlob(blob: Blob): Promise<{ base64: string; ext: string }> {
@@ -64,6 +70,19 @@ export default function Panel() {
   // Only meaningful on macOS, where the double-shift listener needs a permission.
   const needsSetup = !!macSetup && macSetup.applicable && !macSetup.tapRunning;
   const [query, setQuery] = useState("");
+  // Color tag picked in the search bar; narrows the list alongside `query`.
+  const [tagFilter, setTagFilter] = useState<string | null>(null);
+  // The search-bar dots sit stacked until clicked, then roll open to pick from.
+  const [tagPickerOpen, setTagPickerOpen] = useState(false);
+  const tagPickerRef = useRef<HTMLSpanElement>(null);
+  // A note (or selection) being dragged onto a section; `over` is the section
+  // under the pointer (null = the unfiled group, undefined = no section).
+  const [noteDrag, setNoteDrag] = useState<{
+    ids: number[];
+    x: number;
+    y: number;
+    over: number | null | undefined;
+  } | null>(null);
   const [input, setInput] = useState("");
   const [selected, setSelected] = useState<number[]>([]);
   const [anchor, setAnchor] = useState<number | null>(null);
@@ -91,6 +110,8 @@ export default function Panel() {
   const [subBranchParentId, setSubBranchParentId] = useState<number | null>(null);
   const subBranchParentIdRef = useRef<number | null>(null);
   const updateCheckedRef = useRef(false);
+  // Current zoom, tracked here so fast repeated presses step from the latest level.
+  const zoomRef = useRef<number | null>(null);
   const setupPromptedRef = useRef(false);
 
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -170,6 +191,14 @@ export default function Panel() {
     setupPromptedRef.current = true;
     setShowMacSetup(true);
   }, [needsSetup]);
+
+  // Rust applies last session's zoom at launch; re-apply it once the page has
+  // loaded too, in case a webview resets its zoom on load.
+  useEffect(() => {
+    if (!state || zoomRef.current !== null) return;
+    zoomRef.current = state.zoom;
+    if (state.zoom !== 1) api.setZoom(state.zoom);
+  }, [state]);
 
   useEffect(() => {
     if (!state || updateCheckedRef.current) return;
@@ -306,6 +335,26 @@ export default function Panel() {
   const items = state?.items ?? [];
   const activeSectionId = state?.activeSectionId ?? null;
   const activeSection = sections.find((s) => s.id === activeSectionId) ?? null;
+  const tagPrefs = useMemo(() => parseTagPrefs(state?.tagPrefs ?? ""), [state?.tagPrefs]);
+  const palette = tagPrefs.tags;
+  // Tagging mode: the color every new note gets (undefined = off).
+  const captureDef = palette.find((t) => t.id === state?.captureTag);
+  const tinted = !!captureDef && tagPrefs.tint;
+
+  // A filter on a color that was just removed from the palette would match nothing.
+  useEffect(() => {
+    if (tagFilter && !palette.some((t) => t.id === tagFilter)) setTagFilter(null);
+  }, [palette, tagFilter]);
+
+  // An open tag picker folds back up when you click anywhere else.
+  useEffect(() => {
+    if (!tagPickerOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (!tagPickerRef.current?.contains(e.target as Node)) setTagPickerOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [tagPickerOpen]);
 
   // Branch children grouped by parent id (children are ordinary items).
   const childrenByParent = useMemo(() => {
@@ -334,9 +383,13 @@ export default function Panel() {
   const groups = useMemo<Group[]>(() => {
     const q = query.trim().toLowerCase();
     const matchText = (i: Item) => i.content.toLowerCase().includes(q);
+    // A note carries a tag if it — or anything anywhere in its branch — does.
+    const hasTag = (i: Item, tag: string): boolean =>
+      i.tags.includes(tag) || (childrenByParent.get(i.id) ?? []).some((c) => hasTag(c, tag));
     // A top-level item matches search if it — or any of its children — matches.
     const match = (i: Item) =>
-      !q || matchText(i) || (childrenByParent.get(i.id) ?? []).some(matchText);
+      (!q || matchText(i) || (childrenByParent.get(i.id) ?? []).some(matchText)) &&
+      (tagFilter === null || hasTag(i, tagFilter));
     const top = (i: Item) => i.parentId === null;
     const result: Group[] = [];
     const unfiled = items.filter((i) => top(i) && i.sectionId === null && match(i));
@@ -351,7 +404,10 @@ export default function Panel() {
         if (inSection.length) {
           result.push({ section: s, items: inSection, collapsed: false, total: inSection.length });
         }
-      } else {
+      } else if (tagFilter === null || inSection.length) {
+        // A tag filter only drops sections with nothing tagged. The rest keep
+        // their real collapsed state, so only open sections show their matches
+        // (collapsed ones show a count) and headers still open and close.
         result.push({
           section: s,
           items: collapsed ? [] : inSection,
@@ -361,7 +417,7 @@ export default function Panel() {
       }
     }
     return result;
-  }, [items, sections, query, activeSectionId, childrenByParent]);
+  }, [items, sections, query, tagFilter, activeSectionId, childrenByParent]);
 
   // Visual order of item ids for keyboard nav/range-select: each top item, then
   // its visible inline children.
@@ -414,25 +470,31 @@ export default function Panel() {
   // Terminal-style "clear the board": size a trailing spacer so the active
   // section's header can scroll to the very top, leaving blank space below.
   useLayoutEffect(() => {
-    if (query || !listRef.current || !activeGroupRef.current || activeSectionId === null) {
+    if (
+      query ||
+      tagFilter ||
+      !listRef.current ||
+      !activeGroupRef.current ||
+      activeSectionId === null
+    ) {
       setSpacerHeight(0);
       return;
     }
     const room = listRef.current.clientHeight - activeGroupRef.current.offsetHeight - 8;
     setSpacerHeight(Math.max(0, room));
-  }, [activeSectionId, groups, query]);
+  }, [activeSectionId, groups, query, tagFilter]);
 
   // On a section create/switch (the "clear" moment) pin the active section to
   // the top. Gated on the previous id so unrelated refreshes don't yank the view.
   useLayoutEffect(() => {
-    if (query) {
+    if (query || tagFilter) {
       prevActiveRef.current = activeSectionId;
       return;
     }
     if (prevActiveRef.current === activeSectionId) return;
     prevActiveRef.current = activeSectionId;
     requestAnimationFrame(() => activeGroupRef.current?.scrollIntoView({ block: "start" }));
-  }, [activeSectionId, spacerHeight, query]);
+  }, [activeSectionId, spacerHeight, query, tagFilter]);
 
   const copyImage = useCallback(
     (item: Item) => {
@@ -551,6 +613,78 @@ export default function Panel() {
     setItemMenu({ x: e.clientX, y: e.clientY, ids });
   };
 
+  // Hold a note, then drag it onto any section (header or notes) to move it there,
+  // like dropping a file on a folder. A selected note carries the whole selection.
+  // Pointer events rather than HTML5 DnD, so it behaves the same in every webview
+  // and never trips the window-level file-drop handling above.
+  const onItemPointerDown = (e: React.PointerEvent, id: number) => {
+    if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || editingId !== null) return;
+    if ((e.target as HTMLElement).closest("button, textarea, input")) return;
+    const ids = selected.includes(id) ? selected : [id];
+    const sx = e.clientX;
+    const sy = e.clientY;
+    let held = false;
+    const sectionAt = (x: number, y: number): number | null | undefined => {
+      const g = document.elementFromPoint(x, y)?.closest("[data-drop-section]");
+      if (!g) return undefined;
+      const v = g.getAttribute("data-drop-section");
+      return v ? Number(v) : null;
+    };
+    const end = () => {
+      window.clearTimeout(timer);
+      document.body.classList.remove("note-held");
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", end);
+      window.removeEventListener("blur", end);
+      window.removeEventListener("keydown", onKey, true);
+      setNoteDrag(null);
+    };
+    const onMove = (ev: PointerEvent) => {
+      if (!held) {
+        // Moving before the hold completes is an ordinary text-selection drag.
+        if (Math.hypot(ev.clientX - sx, ev.clientY - sy) > 5) end();
+        return;
+      }
+      window.getSelection()?.removeAllRanges();
+      // Nudge the list near its top/bottom edge so off-screen sections stay reachable.
+      const list = listRef.current;
+      if (list) {
+        const r = list.getBoundingClientRect();
+        if (ev.clientY < r.top + 24) list.scrollTop -= 10;
+        else if (ev.clientY > r.bottom - 24) list.scrollTop += 10;
+      }
+      setNoteDrag({ ids, x: ev.clientX, y: ev.clientY, over: sectionAt(ev.clientX, ev.clientY) });
+    };
+    const onUp = (ev: PointerEvent) => {
+      const target = held ? sectionAt(ev.clientX, ev.clientY) : undefined;
+      end();
+      if (target === undefined) return;
+      // Notes already in that section stay put, so dropping back home is a no-op.
+      const moving = ids.filter((i) => (itemById.get(i)?.sectionId ?? null) !== target);
+      if (!moving.length) return;
+      api
+        .moveToSection(moving, target)
+        .then(() => flashToast(`Moved to ${sections.find((s) => s.id === target)?.name ?? "Inbox"}`))
+        .catch((err) => flashToast(typeof err === "string" ? err : "Couldn't move note"));
+    };
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key !== "Escape") return;
+      ev.stopPropagation(); // cancel the drag without also hiding the panel
+      end();
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", end);
+    window.addEventListener("blur", end);
+    window.addEventListener("keydown", onKey, true);
+    const timer = window.setTimeout(() => {
+      held = true;
+      window.getSelection()?.removeAllRanges();
+      document.body.classList.add("note-held");
+    }, HOLD_MS);
+  };
+
   // Global keyboard handling.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -569,9 +703,28 @@ export default function Panel() {
         setShowHelp((v) => !v);
         return;
       }
+      // Browser-style zoom, from anywhere (even while typing): Ctrl/⌘ + − 0.
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && ["=", "+", "-", "0"].includes(e.key)) {
+        e.preventDefault();
+        const cur = zoomRef.current ?? 1;
+        const next =
+          e.key === "0"
+            ? 1
+            : e.key === "-"
+              ? [...ZOOM_STEPS].reverse().find((z) => z < cur - 0.001) ?? ZOOM_STEPS[0]
+              : ZOOM_STEPS.find((z) => z > cur + 0.001) ?? ZOOM_STEPS[ZOOM_STEPS.length - 1];
+        zoomRef.current = next;
+        api.setZoom(next);
+        flashToast(`Zoom ${Math.round(next * 100)}%`);
+        return;
+      }
       if (e.key === "Escape") {
         if (showHelp || showSettings || showMacSetup || showSwitcher || itemMenu || sectionMenu || appMenu)
           return; // overlays close themselves
+        if (tagPickerOpen) {
+          setTagPickerOpen(false);
+          return;
+        }
         if (editingId !== null) return;
         if (inField && (target as HTMLTextAreaElement).value) return;
         // First Esc exits sub-branch mode without hiding the panel; a second Esc
@@ -583,6 +736,11 @@ export default function Panel() {
         }
         if (selected.length) {
           setSelected([]);
+          return;
+        }
+        // Drop a tag filter before hiding, so the panel never reopens half-empty.
+        if (tagFilter) {
+          setTagFilter(null);
           return;
         }
         api.hidePanel();
@@ -735,6 +893,8 @@ export default function Panel() {
     childrenByParent,
     depthById,
     flashToast,
+    tagFilter,
+    tagPickerOpen,
   ]);
 
   const submitInput = async () => {
@@ -763,7 +923,7 @@ export default function Panel() {
     focusComposer();
   };
 
-  const menuEntries = (ids: number[]): MenuEntry[] => {
+  const menuEntries = (ids: number[]): MenuRow[] => {
     const targets = ids.map((id) => itemById.get(id)).filter((i): i is Item => !!i);
     const allDone = targets.every((i) => i.done);
     const single = targets.length === 1;
@@ -776,7 +936,7 @@ export default function Panel() {
     const hasChildren = single ? (childrenByParent.get(target!.id)?.length ?? 0) > 0 : false;
     const panelStyle = single && target!.branchStyle === "panel";
 
-    const entries: MenuEntry[] = [
+    const entries: MenuRow[] = [
       {
         label: singleImage ? "Copy Image" : "Copy",
         kbd: `${MOD} C`,
@@ -838,6 +998,16 @@ export default function Panel() {
         }
       }
     }
+
+    // Finder-style tag dots: a dot every target already has removes it from all,
+    // otherwise it is added to all.
+    entries.push({
+      separatorBefore: true,
+      swatches: palette.map((t) => {
+        const on = targets.every((i) => i.tags.includes(t.id));
+        return { label: t.name, color: t.color, on, onClick: () => api.setTag(ids, t.id, !on) };
+      }),
+    });
 
     entries.push({
       label: single ? "Save to Obsidian" : `Save ${targets.length} to Obsidian`,
@@ -951,14 +1121,18 @@ export default function Panel() {
           depth={depth}
           selected={selected.includes(item.id)}
           armed={subBranchParentId === item.id}
+          lifted={!!noteDrag?.ids.includes(item.id)}
+          tinted={tinted && item.tags.includes(captureDef!.id)}
           editing={editingId === item.id}
           attachments={attachmentsByItem.get(item.id)}
+          tagDefs={palette.filter((t) => item.tags.includes(t.id))}
           hasChildren={hasKids}
           childCount={kids.length}
           branchCollapsed={item.collapsed}
           branchStyle={item.branchStyle}
           onClick={(e) => onItemClick(e, item.id)}
           onContextMenu={(e) => onItemContextMenu(e, item.id)}
+          onPointerDown={(e) => onItemPointerDown(e, item.id)}
           onToggleDone={() => api.toggleDone(item.id)}
           onDoubleClick={() => item.kind !== "image" && setEditingId(item.id)}
           onEditSave={finishEdit}
@@ -978,9 +1152,19 @@ export default function Panel() {
 
   const branchPaneParent = branchPaneId != null ? itemById.get(branchPaneId) : undefined;
   const isEmpty = items.length === 0;
+  const filterDef = palette.find((t) => t.id === tagFilter);
+  const tagLabel = filterDef?.name;
+  const setCaptureTag = (t: TagDef | null) => {
+    api.setCaptureTag(t?.id ?? "");
+    flashToast(t ? `New notes will be tagged ${t.name}` : "Tagging off");
+  };
+  const dragFirst = noteDrag ? itemById.get(noteDrag.ids[0]) : undefined;
 
   return (
-    <div className="panel">
+    <div
+      className={`panel${tinted ? " tinted" : ""}`}
+      style={tinted ? (tintVars(captureDef!.color) as React.CSSProperties) : undefined}
+    >
       <div className="topbar" data-tauri-drag-region>
         <div className="search">
           <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden>
@@ -988,7 +1172,7 @@ export default function Panel() {
             <path d="M10.5 10.5 L14 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
           </svg>
           <input
-            placeholder="Search"
+            placeholder={tagLabel ? `Search ${tagLabel} notes` : "Search"}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
@@ -998,6 +1182,45 @@ export default function Panel() {
               }
             }}
           />
+          <span
+            ref={tagPickerRef}
+            className={`tag-filter${tagPickerOpen ? " open" : ""}${tagFilter ? " active" : ""}${
+              tagPrefs.animate ? "" : " instant"
+            }`}
+            onWheel={(e) => {
+              // A plain mouse wheel scrolls a long row of colors sideways.
+              if (tagPickerOpen) e.currentTarget.scrollLeft += e.deltaY;
+            }}
+          >
+            {palette.map((t, i) => (
+              <button
+                key={t.id}
+                className={`tag-filter-dot${tagFilter === t.id ? " on" : ""}`}
+                style={
+                  {
+                    background: t.color,
+                    // Peel off right to left, so the stack rolls open toward the left.
+                    "--roll-delay": `${Math.min(palette.length - 1 - i, 8) * 22}ms`,
+                  } as React.CSSProperties
+                }
+                title={
+                  !tagPickerOpen
+                    ? "Filter by tag"
+                    : tagFilter === t.id
+                      ? "Show all notes"
+                      : `Show ${t.name} notes`
+                }
+                onClick={() => {
+                  if (!tagPickerOpen) {
+                    setTagPickerOpen(true);
+                    return;
+                  }
+                  setTagFilter((cur) => (cur === t.id ? null : t.id));
+                  setTagPickerOpen(false);
+                }}
+              />
+            ))}
+          </span>
         </div>
         <button
           className="icon-btn"
@@ -1050,7 +1273,8 @@ export default function Panel() {
           groups.map((g) => (
             <div
               key={g.section?.id ?? "unfiled"}
-              className="group"
+              className={`group${noteDrag && noteDrag.over === (g.section?.id ?? null) ? " drop-target" : ""}`}
+              data-drop-section={g.section?.id ?? ""}
               ref={g.section && g.section.id === activeSectionId ? activeGroupRef : undefined}
             >
               {g.section && (
@@ -1089,7 +1313,12 @@ export default function Panel() {
                       {g.section.id === activeSectionId && <span className="active-dot" />}
                       {g.section.name}
                       {g.collapsed && g.total > 0 && (
-                        <span className="group-count">{g.total}</span>
+                        <span
+                          className="group-count"
+                          style={filterDef ? { color: filterDef.color } : undefined}
+                        >
+                          {g.total}
+                        </span>
                       )}
                     </button>
                   )}
@@ -1103,8 +1332,10 @@ export default function Panel() {
             </div>
           ))
         )}
-        {!isEmpty && query && flatIds.length === 0 && (
-          <div className="no-results">No matches for “{query}”</div>
+        {!isEmpty && (query || tagFilter) && groups.length === 0 && (
+          <div className="no-results">
+            {query ? `No matches for “${query}”` : `No ${tagLabel} notes`}
+          </div>
         )}
         {!query && spacerHeight > 0 && (
           <div className="board-spacer" style={{ height: spacerHeight }} aria-hidden />
@@ -1112,6 +1343,16 @@ export default function Panel() {
       </div>
 
       {toast && <div className="toast">{toast}</div>}
+
+      {noteDrag && (
+        <div className="note-ghost" style={{ left: noteDrag.x + 14, top: noteDrag.y + 10 }}>
+          {noteDrag.ids.length > 1
+            ? `${noteDrag.ids.length} notes`
+            : dragFirst?.kind === "image"
+              ? "Image"
+              : dragFirst?.content.split("\n")[0] || "Note"}
+        </div>
+      )}
 
       {dropCount !== null && (
         <div className="drop-overlay">
@@ -1149,7 +1390,9 @@ export default function Panel() {
       <div className="composer">
         <button
           className="composer-add"
-          title="Attach or draw"
+          title={captureDef ? `Tagging new notes ${captureDef.name}` : "Attach, draw, or tag"}
+          // Tagging mode shows here too, so it's visible even with the tint off.
+          style={captureDef ? { borderColor: captureDef.color, color: captureDef.color, opacity: 1 } : undefined}
           onClick={(e) => {
             const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
             setComposerMenu({ x: r.left, y: r.top - 8 });
@@ -1255,6 +1498,17 @@ export default function Panel() {
           entries={[
             { label: "Attach Images…", onClick: () => fileInputRef.current?.click() },
             { label: "Create Drawing…", onClick: () => api.openDraw() },
+            {
+              separatorBefore: true,
+              caption: "Tag New Notes",
+              swatches: palette.map((t) => {
+                const on = captureDef?.id === t.id;
+                return { label: t.name, color: t.color, on, onClick: () => setCaptureTag(on ? null : t) };
+              }),
+            },
+            ...(captureDef
+              ? [{ label: `Turn Off ${captureDef.name} Tagging`, onClick: () => setCaptureTag(null) }]
+              : []),
           ]}
           onClose={() => setComposerMenu(null)}
         />

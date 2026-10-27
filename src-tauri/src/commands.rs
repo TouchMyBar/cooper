@@ -1074,6 +1074,149 @@ pub fn set_item_collapsed(app: AppHandle, db: State<db::Db>, id: i64, collapsed:
     Ok(())
 }
 
+/// Add or remove one color tag on several notes at once (the dot row in the note
+/// menu). Ids are stored comma-separated; the UI orders the dots by the palette.
+#[tauri::command]
+pub fn set_tag(app: AppHandle, db: State<db::Db>, ids: Vec<i64>, tag: String, on: bool) -> CmdResult<()> {
+    if tag.is_empty() || tag.contains(',') {
+        return Err("invalid tag".into());
+    }
+    let conn = db.0.lock().map_err(err)?;
+    for id in ids {
+        let current: String = conn
+            .query_row(
+                "SELECT tags FROM items WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .map_err(err)?;
+        let mut next: Vec<&str> = current.split(',').filter(|t| !t.is_empty() && *t != tag).collect();
+        if on {
+            next.push(&tag);
+        }
+        conn.execute(
+            "UPDATE items SET tags = ?2 WHERE id = ?1",
+            rusqlite::params![id, next.join(",")],
+        )
+        .map_err(err)?;
+    }
+    drop(conn);
+    refresh(&app);
+    Ok(())
+}
+
+/// Save the tag palette + picker options (JSON, see src/tags.ts). A color removed
+/// from the palette is also taken off every note, and ends tagging mode if it was
+/// the active one, so no note is left carrying an invisible tag.
+#[tauri::command]
+pub fn set_tag_prefs(app: AppHandle, db: State<db::Db>, json: String) -> CmdResult<()> {
+    #[derive(serde::Deserialize)]
+    struct Prefs {
+        tags: Vec<Tag>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Tag {
+        id: String,
+    }
+    let prefs: Prefs = serde_json::from_str(&json).map_err(err)?;
+    let keep: std::collections::HashSet<String> = prefs.tags.into_iter().map(|t| t.id).collect();
+    let conn = db.0.lock().map_err(err)?;
+    db::set_setting(&conn, "tag_prefs", json.trim()).map_err(err)?;
+    let tagged: Vec<(i64, String)> = conn
+        .prepare("SELECT id, tags FROM items WHERE tags != ''")
+        .and_then(|mut s| {
+            s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()
+        })
+        .map_err(err)?;
+    for (id, tags) in tagged {
+        let next: Vec<&str> = tags.split(',').filter(|t| keep.contains(*t)).collect();
+        if next.join(",") != tags {
+            conn.execute(
+                "UPDATE items SET tags = ?2 WHERE id = ?1",
+                rusqlite::params![id, next.join(",")],
+            )
+            .map_err(err)?;
+        }
+    }
+    if !keep.contains(&db::capture_tag(&conn)) {
+        db::set_setting(&conn, "capture_tag", "").map_err(err)?;
+    }
+    drop(conn);
+    refresh(&app);
+    Ok(())
+}
+
+/// Tagging mode: every note created from now on gets `tag` ("" turns it off).
+#[tauri::command]
+pub fn set_capture_tag(app: AppHandle, db: State<db::Db>, tag: String) -> CmdResult<()> {
+    if tag.contains(',') {
+        return Err("invalid tag".into());
+    }
+    {
+        let conn = db.0.lock().map_err(err)?;
+        db::set_setting(&conn, "capture_tag", &tag).map_err(err)?;
+    }
+    refresh(&app);
+    Ok(())
+}
+
+/// Zoom the panel (Ctrl/⌘ + − 0), clamped to 50–200% and remembered for next launch.
+/// Native webview zoom, so clicks, drags and menus keep lining up with what's drawn.
+#[tauri::command]
+pub fn set_zoom(app: AppHandle, db: State<db::Db>, zoom: f64) -> CmdResult<f64> {
+    if !zoom.is_finite() {
+        return Err("invalid zoom".into());
+    }
+    let zoom = zoom.clamp(0.5, 2.0);
+    {
+        let conn = db.0.lock().map_err(err)?;
+        db::set_setting(&conn, "zoom", &zoom.to_string()).map_err(err)?;
+    }
+    if let Some(win) = app.get_webview_window("main") {
+        win.set_zoom(zoom).map_err(err)?;
+    }
+    refresh(&app);
+    Ok(zoom)
+}
+
+/// Move notes into a section (dragging a note onto a section). Each note takes its
+/// whole branch along and lands top-level; a note whose ancestor is also being
+/// moved just rides along inside that ancestor's branch.
+#[tauri::command]
+pub fn move_to_section(
+    app: AppHandle,
+    db: State<db::Db>,
+    ids: Vec<i64>,
+    section_id: Option<i64>,
+) -> CmdResult<()> {
+    let conn = db.0.lock().map_err(err)?;
+    let items = db::list_items(&conn).map_err(err)?;
+    let moving: std::collections::HashSet<i64> = ids.into_iter().collect();
+    for it in items.iter().filter(|i| moving.contains(&i.id)) {
+        if has_selected_ancestor(&items, it, &moving) {
+            continue;
+        }
+        let mut branch = Vec::new();
+        collect_subtree_ids(&items, it.id, &mut branch);
+        conn.execute(
+            "UPDATE items SET parent_id = NULL WHERE id = ?1",
+            rusqlite::params![it.id],
+        )
+        .map_err(err)?;
+        for id in branch {
+            conn.execute(
+                "UPDATE items SET section_id = ?2 WHERE id = ?1",
+                rusqlite::params![id, section_id],
+            )
+            .map_err(err)?;
+        }
+    }
+    drop(conn);
+    refresh(&app);
+    Ok(())
+}
+
 /// Why the macOS double-shift listener isn't running yet, so the UI can show
 /// the single step that applies. Every field is inert off macOS.
 #[derive(serde::Serialize)]

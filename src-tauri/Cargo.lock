@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "cooper"
-version = "0.3.75"
+version = "0.4.0"
 dependencies = [
  "arboard",
  "base64 0.22.1",

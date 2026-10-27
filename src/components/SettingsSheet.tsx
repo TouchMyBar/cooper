@@ -2,9 +2,11 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../store";
 import { BUILTIN_CHOICES, preview, reloadSoundPrefs, resolveUrl } from "../sounds";
+import { parseTagPrefs, type TagDef } from "../tags";
 import type { SoundPrefs } from "../types";
 import ContextMenu from "./ContextMenu";
 import ShortcutsEditor from "./ShortcutsEditor";
+import TagsEditor from "./TagsEditor";
 
 const MAX_CUSTOM_BYTES = 1_500_000;
 const EVENTS: { key: "capture" | "newNote"; label: string }[] = [
@@ -22,6 +24,8 @@ export default function SettingsSheet({ onClose }: { onClose: () => void }) {
   const [vaultDir, setVaultDir] = useState("");
   const [detectedVault, setDetectedVault] = useState<string | null>(null);
   const [showEditor, setShowEditor] = useState(false);
+  const [showTags, setShowTags] = useState(false);
+  const [tags, setTags] = useState<TagDef[]>([]);
   const fileFor = useRef<"capture" | "newNote" | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
@@ -32,6 +36,7 @@ export default function SettingsSheet({ onClose }: { onClose: () => void }) {
       .then((s) => {
         setExportDir(s.exportDir);
         setVaultDir(s.obsidianVaultDir);
+        setTags(parseTagPrefs(s.tagPrefs).tags);
       })
       .catch(() => {});
     api.detectObsidianVault().then(setDetectedVault).catch(() => setDetectedVault(null));
@@ -39,14 +44,14 @@ export default function SettingsSheet({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !showEditor) {
+      if (e.key === "Escape" && !showEditor && !showTags) {
         e.stopPropagation();
         onClose();
       }
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose, showEditor]);
+  }, [onClose, showEditor, showTags]);
 
   const prefFor = (key: "capture" | "newNote") =>
     key === "capture" ? prefs?.capture : prefs?.newNote;
@@ -126,6 +131,18 @@ export default function SettingsSheet({ onClose }: { onClose: () => void }) {
   };
 
   if (showEditor) return <ShortcutsEditor onClose={() => setShowEditor(false)} />;
+  if (showTags)
+    return (
+      <TagsEditor
+        onClose={() => {
+          setShowTags(false);
+          api
+            .getState()
+            .then((s) => setTags(parseTagPrefs(s.tagPrefs).tags))
+            .catch(() => {});
+        }}
+      />
+    );
 
   return (
     <div className="overlay" onMouseDown={onClose}>
@@ -196,6 +213,22 @@ export default function SettingsSheet({ onClose }: { onClose: () => void }) {
             })}
           </div>
         )}
+
+        {/* Tags — opens the palette editor */}
+        <div className="settings-section-title">Tags</div>
+        <div className="settings-card">
+          <button className="settings-row settings-link" onClick={() => setShowTags(true)}>
+            <span className="settings-label">Edit tags</span>
+            <span className="settings-value">
+              <span className="tags-preview" aria-hidden>
+                {tags.map((t) => (
+                  <span key={t.id} style={{ background: t.color }} />
+                ))}
+              </span>
+              <span className="settings-chev">›</span>
+            </span>
+          </button>
+        </div>
 
         {/* Export — single row */}
         <div className="settings-section-title">Export</div>

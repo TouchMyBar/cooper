@@ -19,6 +19,8 @@ export interface Item {
   branchStyle: string;
   /** Inline-branch collapsed state. */
   collapsed: boolean;
+  /** Color tag ids (see src/tags.ts); display order comes from the palette. */
+  tags: string[];
 }
 
 export interface Attachment {
@@ -56,6 +58,12 @@ export interface AppState {
   exportDir: string;
   obsidianVaultDir: string;
   keybinds: string;
+  /** Tag palette + picker options as JSON ("" = defaults); see src/tags.ts. */
+  tagPrefs: string;
+  /** Tag id stamped on every new note ("" = tagging mode off). */
+  captureTag: string;
+  /** Panel zoom, 0.5–2 (1 = 100%). */
+  zoom: number;
 }
 
 export interface MacSetup {

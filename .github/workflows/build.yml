@@ -49,7 +49,11 @@ jobs:
           # `strip` does not remove them, so a binary would otherwise ship the
           # builder's home directory. Expanded here by the shell so no absolute
           # path is ever committed. (Cargo's own `trim-paths` is still nightly.)
-          echo "RUSTFLAGS=--remap-path-prefix=$HOME=/build --remap-path-prefix=$PWD=/src" >> "$GITHUB_ENV"
+          # On Windows this shell sees /c/Users/..., but rustc records
+          # C:\Users\..., so hand rustc the Windows form or nothing matches.
+          home="$HOME"; src="$PWD"
+          if command -v cygpath >/dev/null; then home="$(cygpath -w "$HOME")"; src="$(cygpath -w "$PWD")"; fi
+          echo "RUSTFLAGS=--remap-path-prefix=$home=/build --remap-path-prefix=$src=/src" >> "$GITHUB_ENV"
 
       - name: Install frontend dependencies
         run: npm install

@@ -9,10 +9,20 @@ export interface MenuEntry {
   onClick: () => void;
 }
 
+/** A Finder-style row of color dots (note tags) in place of a text item. */
+export interface MenuSwatches {
+  swatches: { label: string; color: string; on: boolean; onClick: () => void }[];
+  /** Small caption above the dots. */
+  caption?: string;
+  separatorBefore?: boolean;
+}
+
+export type MenuRow = MenuEntry | MenuSwatches;
+
 interface Props {
   x: number;
   y: number;
-  entries: MenuEntry[];
+  entries: MenuRow[];
   onClose: () => void;
 }
 
@@ -58,17 +68,37 @@ export default function ContextMenu({ x, y, entries, onClose }: Props) {
       {entries.map((entry, i) => (
         <div key={i}>
           {entry.separatorBefore && <div className="menu-sep" />}
-          <button
-            className={`menu-item${entry.danger ? " danger" : ""}`}
-            disabled={entry.disabled}
-            onClick={() => {
-              onClose();
-              entry.onClick();
-            }}
-          >
-            <span>{entry.label}</span>
-            {entry.kbd && <span className="menu-kbd">{entry.kbd}</span>}
-          </button>
+          {"swatches" in entry && entry.caption && (
+            <div className="menu-caption">{entry.caption}</div>
+          )}
+          {"swatches" in entry ? (
+            <div className="menu-swatches">
+              {entry.swatches.map((s) => (
+                <button
+                  key={s.label}
+                  className={`menu-swatch${s.on ? " on" : ""}`}
+                  style={{ background: s.color }}
+                  title={s.on ? `Remove ${s.label}` : s.label}
+                  onClick={() => {
+                    onClose();
+                    s.onClick();
+                  }}
+                />
+              ))}
+            </div>
+          ) : (
+            <button
+              className={`menu-item${entry.danger ? " danger" : ""}`}
+              disabled={entry.disabled}
+              onClick={() => {
+                onClose();
+                entry.onClick();
+              }}
+            >
+              <span>{entry.label}</span>
+              {entry.kbd && <span className="menu-kbd">{entry.kbd}</span>}
+            </button>
+          )}
         </div>
       ))}
     </div>

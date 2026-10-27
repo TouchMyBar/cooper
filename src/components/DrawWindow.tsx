@@ -11,6 +11,36 @@ import {
   type Tool,
 } from "../draw/shapes";
 
+// A ring about the eraser's reach, so you can see what it will pick up.
+const ERASER_CURSOR =
+  "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E" +
+  "%3Ccircle cx='10' cy='10' r='9' fill='white' stroke='%23333'/%3E%3C/svg%3E\") 10 10, crosshair";
+
+const ICON = {
+  viewBox: "0 0 16 16",
+  width: 16,
+  height: 16,
+  fill: "none",
+  stroke: "currentColor",
+  strokeWidth: 1.4,
+  strokeLinecap: "round" as const,
+  strokeLinejoin: "round" as const,
+  "aria-hidden": true,
+};
+// Four-way arrows: pick an item up and move it.
+const MOVE_ICON = (
+  <svg {...ICON}>
+    <path d="M8 1.8v12.4M1.8 8h12.4M6.2 3.6 8 1.8l1.8 1.8M6.2 12.4 8 14.2l1.8-1.8M3.6 6.2 1.8 8l1.8 1.8M12.4 6.2 14.2 8l-1.8 1.8" />
+  </svg>
+);
+// A tilted block eraser.
+const ERASER_ICON = (
+  <svg {...ICON}>
+    <path d="M10.2 2.6 13.4 5.8 7.2 12H4.6L2.6 10z" />
+    <path d="M6.2 6.6 9.4 9.8M7.2 12h6" />
+  </svg>
+);
+
 export default function DrawWindow() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const textInputRef = useRef<HTMLInputElement>(null);
@@ -19,7 +49,17 @@ export default function DrawWindow() {
   // surface is painted by hand — React state is used only for toolbar/UI.
   const shapesRef = useRef<Shape[]>([]);
   const draftRef = useRef<Shape | null>(null); // shape being drawn right now
-  const dragRef = useRef<{ shape: Shape; lastX: number; lastY: number } | null>(null);
+  const dragRef = useRef<{ shape: Shape; lastX: number; lastY: number; moved: boolean } | null>(
+    null,
+  );
+  // An eraser swipe in progress: the last pointer position, and whether it has
+  // removed anything yet (the whole swipe is one undo step).
+  const eraseRef = useRef<{ x: number; y: number; erased: boolean } | null>(null);
+  // Snapshots of the canvas before each change, newest last, for undo.
+  const historyRef = useRef<Shape[][]>([]);
+  // Shapes are plain data, so a JSON round-trip is a full copy (and works on older
+  // WebKitGTK, which lacks structuredClone).
+  const remember = () => historyRef.current.push(JSON.parse(JSON.stringify(shapesRef.current)));
   const idRef = useRef(1);
   const nextId = () => idRef.current++;
 
@@ -84,12 +124,16 @@ export default function DrawWindow() {
       if (editing !== null) return; // the text input owns the keyboard
       if ((e.ctrlKey || e.metaKey) && (e.key === "z" || e.key === "Z")) {
         e.preventDefault();
-        const removed = shapesRef.current.pop();
-        if (removed && removed.id === selectedId) setSelectedId(null);
-        redraw();
+        const prev = historyRef.current.pop();
+        if (prev) {
+          shapesRef.current = prev;
+          setSelectedId(null);
+          redraw();
+        }
       } else if (e.key === "Delete" || e.key === "Backspace") {
         if (selectedId != null) {
           e.preventDefault();
+          remember();
           shapesRef.current = shapesRef.current.filter((s) => s.id !== selectedId);
           setSelectedId(null);
           redraw();
@@ -126,7 +170,13 @@ export default function DrawWindow() {
     if (tool === "select") {
       const hit = hitTest(shapesRef.current, x, y);
       setSelectedId(hit ? hit.id : null);
-      dragRef.current = hit ? { shape: hit, lastX: x, lastY: y } : null;
+      dragRef.current = hit ? { shape: hit, lastX: x, lastY: y, moved: false } : null;
+      return;
+    }
+
+    if (tool === "eraser") {
+      eraseRef.current = { x, y, erased: false };
+      eraseAlong(x, y, x, y);
       return;
     }
 
@@ -157,8 +207,20 @@ export default function DrawWindow() {
   const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const { x, y } = getPos(e);
 
+    if (eraseRef.current) {
+      const er = eraseRef.current;
+      eraseAlong(er.x, er.y, x, y);
+      er.x = x;
+      er.y = y;
+      return;
+    }
+
     if (dragRef.current) {
       const d = dragRef.current;
+      if (!d.moved) {
+        remember();
+        d.moved = true;
+      }
       moveShape(d.shape, x - d.lastX, y - d.lastY);
       d.lastX = x;
       d.lastY = y;
@@ -178,6 +240,7 @@ export default function DrawWindow() {
   };
 
   const onPointerUp = () => {
+    eraseRef.current = null;
     if (dragRef.current) {
       dragRef.current = null;
       return;
@@ -194,8 +257,37 @@ export default function DrawWindow() {
       const b = shapeBounds(draft);
       keep = b.w > 2 || b.h > 2;
     }
-    if (keep) shapesRef.current.push(draft);
+    if (keep) {
+      remember();
+      shapesRef.current.push(draft);
+    }
     redraw();
+  };
+
+  // Eraser: remove every shape the pointer passes over, sampling the path so a
+  // quick swipe can't skip over a thin line.
+  const eraseAlong = (x0: number, y0: number, x1: number, y1: number) => {
+    const er = eraseRef.current;
+    if (!er) return;
+    const steps = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 4));
+    let changed = false;
+    for (let i = 0; i <= steps; i++) {
+      const x = x0 + ((x1 - x0) * i) / steps;
+      const y = y0 + ((y1 - y0) * i) / steps;
+      let hit = hitTest(shapesRef.current, x, y);
+      while (hit) {
+        if (!er.erased) {
+          remember();
+          er.erased = true;
+        }
+        const gone = hit;
+        shapesRef.current = shapesRef.current.filter((s) => s !== gone);
+        if (gone.id === selectedId) setSelectedId(null);
+        changed = true;
+        hit = hitTest(shapesRef.current, x, y);
+      }
+    }
+    if (changed) redraw();
   };
 
   const commitText = () => {
@@ -203,6 +295,7 @@ export default function DrawWindow() {
     textHandledRef.current = true;
     const v = textValue.trim();
     if (v && editing) {
+      remember();
       shapesRef.current.push({
         id: nextId(),
         type: "text",
@@ -226,6 +319,7 @@ export default function DrawWindow() {
   };
 
   const clear = () => {
+    if (shapesRef.current.length) remember();
     shapesRef.current = [];
     setSelectedId(null);
     redraw();
@@ -240,9 +334,10 @@ export default function DrawWindow() {
     getCurrentWindow().close();
   };
 
-  const tools: { t: Tool; label: string; title: string }[] = [
-    { t: "select", label: "▲", title: "Select" },
+  const tools: { t: Tool; label: React.ReactNode; title: string }[] = [
+    { t: "select", label: MOVE_ICON, title: "Move (drag an item; Delete removes it)" },
     { t: "pen", label: "✏", title: "Pen" },
+    { t: "eraser", label: ERASER_ICON, title: "Eraser (drag over items to remove them)" },
     { t: "line", label: "／", title: "Line" },
     { t: "arrow", label: "↗", title: "Arrow" },
     { t: "rect", label: "▭", title: "Rectangle" },
@@ -259,6 +354,7 @@ export default function DrawWindow() {
       <canvas
         ref={canvasRef}
         className="draw-canvas"
+        style={{ cursor: tool === "eraser" ? ERASER_CURSOR : tool === "select" ? "move" : undefined }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}

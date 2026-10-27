@@ -63,6 +63,11 @@ fn main() {
             commands::add_child,
             commands::set_branch_style,
             commands::set_item_collapsed,
+            commands::set_tag,
+            commands::set_tag_prefs,
+            commands::set_capture_tag,
+            commands::set_zoom,
+            commands::move_to_section,
             commands::mac_setup_state,
             commands::mac_open_accessibility,
             commands::mac_remove_quarantine,
@@ -72,6 +77,7 @@ fn main() {
             std::fs::create_dir_all(&data_dir)?;
             let conn = db::init(&data_dir.join("cooper.db"))?;
             let glass_on = db::get_setting(&conn, "theme").as_deref() == Some("glass");
+            let zoom = db::zoom(&conn);
             app.manage(db::Db(Mutex::new(conn)));
             app.manage(db::CaptureParent(Mutex::new(None)));
 
@@ -91,6 +97,8 @@ fn main() {
                 if glass_on {
                     glass::apply(&win, true);
                 }
+                // Last session's zoom, before the panel first paints.
+                let _ = win.set_zoom(zoom);
             }
             Ok(())
         })

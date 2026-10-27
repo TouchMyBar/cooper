@@ -25,8 +25,16 @@ AI apps, terminals, and browsers — ChatGPT, Claude, Cursor, anything.
 a single SQLite file on your machine.
 
 <p align="center">
-  <img src="docs/screenshot-dark.png" width="330" alt="Cooper dark theme — empty state with capture shortcuts" />
-  <img src="docs/screenshot-glass.png" width="330" alt="Cooper glass theme — captured items with inline markdown formatting" />
+  <img src="docs/screenshot-dark.png" width="250" alt="Cooper dark theme — sections, color-tagged notes, a branch, and an image note" />
+  <img src="docs/screenshot-tagging.png" width="250" alt="Tagging mode — new notes are tagged Red and the app takes on the color" />
+  <img src="docs/screenshot-filter.png" width="250" alt="Filtering by tag from the stacked color dots in the search bar" />
+</p>
+<p align="center">
+  <img src="docs/screenshot-menu.png" width="250" alt="Right-click a note to tag it with Finder-style color dots" />
+  <img src="docs/screenshot-tags.png" width="250" alt="Settings → Edit tags: recolor, rename, reorder, add, or remove colors" />
+</p>
+<p align="center">
+  <img src="docs/screenshot-draw.png" width="520" alt="The drawing pad with move, eraser, shapes, and text tools" />
 </p>
 
 ## Download
@@ -72,6 +80,8 @@ First-run notes:
 | Switch / create section | `Ctrl/Cmd` + `K` |
 | Copy selected · Copy as list | `Ctrl/Cmd` + `C` · `Ctrl/Cmd` + `Shift` + `C` |
 | Mark as done / Edit / Delete | `Space` / `Enter` / `Del` |
+| Create branch / sub-branch mode | `Ctrl/Cmd` + `B` |
+| Zoom in / out / reset | `Ctrl/Cmd` + `+` / `-` / `0` |
 | Shortcut sheet | `Ctrl/Cmd` + `/` |
 
 ## Features
@@ -96,6 +106,30 @@ First-run notes:
   unsupported so captured snake_case and `__dunder__` code isn't mangled.)
 - **Copy as List** — multi-select items and copy them back out as a Markdown
   list, ready to paste into a prompt.
+- **Color tags** — right-click any note (or a whole selection) for Apple's
+  Finder-style color dots. A tagged note's done-circle takes on its color, and
+  checking it off fills the circle in. Filter from the stacked dots in the
+  search bar: click to roll them open, pick a color. Open sections show their
+  matches, collapsed ones show a count, and headers still open and close.
+- **Tagging mode** — `+` → *Tag New Notes* → pick a color, and every new
+  note, capture, image, or drawing gets it until you turn it off. The app
+  tints itself in that color so you always know you're in it.
+- **Your own palette** — Settings → *Edit tags*: recolor from a palette or the
+  system color picker, rename, drag to reorder, add or remove colors, and
+  switch the picker animation or app tint off.
+- **Drag notes between sections** — hold a note, then drop it on any
+  section (even a collapsed one), like moving a file into a folder. Its whole
+  branch comes along, and a selection moves together.
+- **Branches** — break a note into sub-points up to ten levels deep, inline or
+  in a side panel. `Ctrl/Cmd+B` on the last note arms *sub-branch mode* so
+  captures nest under it automatically.
+- **Drawing pad** — `+` → *Create Drawing…*: pen, line, arrow, rectangle,
+  ellipse, and text, plus **Move** and an **Eraser** that removes whatever you
+  drag across. Undo covers every step; Save drops it on the board as an image.
+- **Save to Obsidian** — right-click → *Save to Obsidian* writes Markdown into
+  your current vault, one file per section, images included.
+- **Zoom** — `Ctrl/Cmd` + `+` / `-` / `0`, 50–200%, remembered between
+  launches.
 - **Themes** — System / Light / Dark / **Glass**. Glass is a translucent
   liquid-glass look built on each OS's cheapest compositor effect: Windows DWM
   acrylic, macOS `NSVisualEffectView` vibrancy (GPU-composited, effectively

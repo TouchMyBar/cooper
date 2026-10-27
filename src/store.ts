@@ -77,6 +77,12 @@ export const api = {
     invoke("set_branch_style", { id, style }),
   setItemCollapsed: (id: number, collapsed: boolean) =>
     invoke("set_item_collapsed", { id, collapsed }),
+  setTag: (ids: number[], tag: string, on: boolean) => invoke("set_tag", { ids, tag, on }),
+  setTagPrefs: (json: string) => invoke("set_tag_prefs", { json }),
+  setCaptureTag: (tag: string) => invoke("set_capture_tag", { tag }),
+  setZoom: (zoom: number) => invoke<number>("set_zoom", { zoom }),
+  moveToSection: (ids: number[], sectionId: number | null) =>
+    invoke("move_to_section", { ids, sectionId }),
 };
 
 // Image items store a stable file path; the data URL for a given path never

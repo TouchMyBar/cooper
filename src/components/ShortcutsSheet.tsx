@@ -24,6 +24,7 @@ const GROUPS: { title: string; rows: [string, string[]][] }[] = [
       ["Navigate", ["↑", "↓"]],
       ["Extend selection", ["⇧", "↑", "↓"]],
       ["This sheet", [`${MOD} /`]],
+      ["Zoom in / out / reset", [`${MOD} +`, `${MOD} −`, `${MOD} 0`]],
       ["Hide panel", ["Esc"]],
     ],
   },

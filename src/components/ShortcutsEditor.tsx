@@ -16,6 +16,7 @@ const FIXED: [string, string][] = [
   ["Capture selected text", "Left Shift × 2"],
   ["Show / hide Cooper", "Right Shift × 2"],
   ["Navigate list", "↑ / ↓"],
+  ["Zoom in / out / reset", `${navigator.userAgent.includes("Mac") ? "⌘" : "Ctrl"} + / − / 0`],
   ["Hide panel", "Esc"],
 ];
 
